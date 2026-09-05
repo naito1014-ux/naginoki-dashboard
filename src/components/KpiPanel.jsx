@@ -26,11 +26,12 @@ const DEPT_ALIAS = [
   ['kitchen', ['キッチン']],
 ];
 const DEPT_NAMES = { total: '全体', cafe: 'カフェ', market: 'マーケット', kitchen: 'キッチン' };
+const FY_START_MONTH = 6;   // 期首月（なぎの木テラスは6月始まり）
 const norm = v => String(v == null ? '' : v).replace(/[\s\u3000]/g, '');
 
 export function parsePlWorkbook(arrayBuffer, fileName) {
   const wb = XLSX.read(arrayBuffer, { type: 'array' });
-  const monthMap = {};
+  const list = [];
   const accSet = {};
 
   wb.SheetNames.forEach(sn => {
@@ -43,7 +44,6 @@ export function parsePlWorkbook(arrayBuffer, fileName) {
     if (!md) return;
     const y = 2018 + parseInt(md[1], 10);
     const m = parseInt(md[2], 10);
-    const ym = y + '-' + String(m).padStart(2, '0');
 
     // 部門見出し行から列位置を検出
     const head = rows[1] || [];
@@ -57,7 +57,7 @@ export function parsePlWorkbook(arrayBuffer, fileName) {
     });
     if (col.total == null) return;
 
-    const rec = { ym, label: String(m).padStart(2, '0') + '月', acc: {} };
+    const rec = { y, m, label: String(m).padStart(2, '0') + '月', acc: {} };
     rows.forEach(r => {
       if (!r || !/^\d{4}$/.test(String(r[0] || '').trim())) return;
       const name = String(r[1] || '').replace(/[\s\u3000]+$/, '').trim();
@@ -70,11 +70,32 @@ export function parsePlWorkbook(arrayBuffer, fileName) {
       rec.acc[name] = v;
       accSet[name] = 1;
     });
-    monthMap[ym] = rec;
+    list.push(rec);
   });
 
-  const months = Object.keys(monthMap).sort().map(k => monthMap[k]);
-  if (!months.length) throw new Error('月次シートが見つかりませんでした。損益計算書のファイルか確認してください。');
+  if (!list.length) throw new Error('月次シートが見つかりませんでした。損益計算書のファイルか確認してください。');
+
+  /* 期首年の決定
+     会計ソフトの出力は一部シートの見出し年がずれていることがあるため、
+     「その月が属する期首年」の多数決で決めて全シートに振り直す。 */
+  const votes = {};
+  list.forEach(r => {
+    const cand = r.m >= FY_START_MONTH ? r.y : r.y - 1;
+    votes[cand] = (votes[cand] || 0) + 1;
+  });
+  let startYear = list[0].y, best = -1;
+  Object.keys(votes).forEach(k => {
+    if (votes[k] > best) { best = votes[k]; startYear = Number(k); }
+  });
+
+  const byPos = {};
+  list.forEach(r => {
+    r.pos = (r.m - FY_START_MONTH + 12) % 12;           // 期首からの経過月
+    r.y = r.m >= FY_START_MONTH ? startYear : startYear + 1;
+    r.ym = r.y + '-' + String(r.m).padStart(2, '0');
+    if (byPos[r.pos] == null) byPos[r.pos] = r;          // 月の重複は先勝ち
+  });
+  const months = Object.keys(byPos).map(Number).sort((a, b) => a - b).map(p => byPos[p]);
 
   const accounts = Object.keys(accSet).sort();
   const depts = ['total', 'cafe', 'market', 'kitchen'];

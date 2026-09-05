@@ -74,8 +74,10 @@ var GAS_URL_KEY = "nk_gas_url";
 // ════════════════════════════════════
 // GAS API Client
 // ════════════════════════════════════
+var DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbwbTwVFL4ACvfASndEAD7fRIO5kDyeAsHXsrn8qV02td_pbPFl3H2aka-13wD9tQ4qO/exec";
+
 function getGasUrl() {
-  try { return localStorage.getItem(GAS_URL_KEY) || ""; } catch(e) { return ""; }
+  try { return localStorage.getItem(GAS_URL_KEY) || DEFAULT_GAS_URL; } catch(e) { return DEFAULT_GAS_URL; }
 }
 
 function setGasUrl(url) {
@@ -109,6 +111,24 @@ function gasPost(body) {
     .then(function(r) { return r.json(); })
     .then(function(d) { return d.ok ? d : null; })
     .catch(function() { return null; });
+}
+
+// gasPost と違い ok:false でも null化せず、レスポンス全体（error含む）を返す。
+// AI分析レポートのようにサーバ側エラーメッセージをUIに表示したいケースで使う。
+function gasPostFull(body) {
+  var url = getGasUrl();
+  if (!url) return Promise.resolve({ ok: false, error: "GAS URLが未設定です。⚙️設定から連携URLを保存してください。" });
+  return fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify(body),
+    redirect: "follow"
+  })
+    .then(function(r) { return r.json(); })
+    .catch(function(err) {
+      console.error("[gasPostFull] エラー:", err);
+      return { ok: false, error: "通信エラー: " + (err && err.message ? err.message : String(err)) };
+    });
 }
 
 
@@ -179,6 +199,27 @@ function extractPeriodFromFilename(fn) {
 }
 
 function fmtYen(v) { return "\u00a5" + (v || 0).toLocaleString(); }
+
+// \u65e5\u4ed8\u6587\u5b57\u5217\uff08"yyyy/m/d", "yyyy-m-d", "yyyy/mm/dd", ISO\u5148\u982d \u306a\u3069\uff09\u3092
+// \u6bd4\u8f03\u53ef\u80fd\u306a "yyyymmdd" \u3078\u6b63\u898f\u5316\u3059\u308b\u3002\u89e3\u91c8\u3067\u304d\u306a\u3044\u5024\uff08\u7a7a\u6587\u5b57\u30fb\u4e0d\u6b63\u65e5\u4ed8\uff09\u306f
+// null \u3092\u8fd4\u3057\u3001\u547c\u3073\u51fa\u3057\u5074\u306f\u300c\u30d5\u30a3\u30eb\u30bf\u7121\u52b9\uff1d\u5168\u671f\u9593\u6271\u3044\u300d\u306b\u30d5\u30a9\u30fc\u30eb\u30d0\u30c3\u30af\u3059\u308b\u3002
+function normDate(s) {
+  if (s == null) return null;
+  var str = String(s).trim();
+  if (!str) return null;
+  var m = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (!m) return null;
+  var mo = parseInt(m[2], 10), da = parseInt(m[3], 10);
+  if (!(mo >= 1 && mo <= 12) || !(da >= 1 && da <= 31)) return null;
+  return m[1] + String(mo).padStart(2, "0") + String(da).padStart(2, "0");
+}
+
+// \u65e5\u4ed8\u6587\u5b57\u5217\u306e\u6607\u9806\u6bd4\u8f03\uff08\u6b63\u898f\u5316\u3067\u304d\u306a\u3044\u5024\u306f\u6587\u5b57\u5217\u6bd4\u8f03\u306b\u30d5\u30a9\u30fc\u30eb\u30d0\u30c3\u30af\uff09
+function cmpDate(a, b) {
+  var na = normDate(a), nb = normDate(b);
+  if (na && nb) return na < nb ? -1 : na > nb ? 1 : 0;
+  return String(a == null ? "" : a).localeCompare(String(b == null ? "" : b));
+}
 
 
 // ════════════════════════════════════
@@ -299,6 +340,181 @@ function ChartTooltip(props) {
 
 
 // ════════════════════════════════════
+// AI分析レポート Card
+//   type: "daily" | "product"
+//   months: 選択可能な月の配列（"yyyy/MM"、降順）
+// ════════════════════════════════════
+function AIReportCard(props) {
+  var type = props.type;
+  var months = props.months || [];
+
+  // 選択部門は配列で保持。空配列＝「全体」を表す
+  var _dept = useState([]); var selDepts = _dept[0]; var setSelDepts = _dept[1];
+  var _month = useState(""); var selMonth = _month[0]; var setSelMonth = _month[1];
+  var _loading = useState(false); var loading = _loading[0]; var setLoading = _loading[1];
+  var _report = useState(null); var report = _report[0]; var setReport = _report[1];
+  var _err = useState(""); var err = _err[0]; var setErr = _err[1];
+  var _cached = useState(false); var cached = _cached[0]; var setCached = _cached[1];
+  var _gen = useState(""); var generatedAt = _gen[0]; var setGeneratedAt = _gen[1];
+
+  // GASに送るdept文字列（単一=そのまま / 複数="キッチン+カフェ" / 空=全体）と表示ラベル
+  var deptParam = selDepts.length === 0 ? "全体" : selDepts.join("+");
+  var deptLabel = selDepts.length === 0 ? "全体" : selDepts.join("＋");
+
+  // 選択中の月が候補に無くなったら先頭に合わせる
+  useEffect(function() {
+    if (months.length === 0) { if (selMonth) setSelMonth(""); return; }
+    if (!selMonth || months.indexOf(selMonth) === -1) setSelMonth(months[0]);
+  }, [months]);
+
+  function run(force) {
+    if (!selMonth) { setErr("対象月を選択してください"); return; }
+    setLoading(true); setErr("");
+    if (force) { setReport(null); }
+    gasPostFull({ action: "getAnalysisReport", type: type, dept: deptParam, month: selMonth, force: !!force })
+      .then(function(res) {
+        setLoading(false);
+        if (!res || !res.ok) {
+          setErr((res && res.error) ? res.error : "レポートの取得に失敗しました");
+          return;
+        }
+        setReport(res.report || null);
+        setCached(res.cached === true);
+        setGeneratedAt(res.generatedAt || "");
+      });
+  }
+
+  var accent = type === "daily" ? "#1b4332" : "#b5651d";
+
+  return (
+    <Card>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <h3 style={{ margin: 0, fontSize: 15, color: "#333", fontWeight: 600 }}>{"📊 AI分析レポート"}</h3>
+        <span style={{ fontSize: 10, color: "#fff", background: accent, borderRadius: 6, padding: "2px 8px", fontWeight: 600 }}>
+          {type === "daily" ? "日別" : "商品別"}
+        </span>
+      </div>
+      <div style={{ fontSize: 12, color: "#999", marginBottom: 14, lineHeight: 1.6 }}>
+        {"当月と前年同月を踏まえてAIが分析します。確定済みの月は2回目以降キャッシュ表示（追加コストなし）。"}
+      </div>
+
+      {/* コントロール */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 8 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {DEPTS.map(function(d) {
+            var isAll = d === "全体";
+            var active = isAll ? selDepts.length === 0 : selDepts.indexOf(d) !== -1;
+            return <button key={d} onClick={function() {
+              if (isAll) { setSelDepts([]); return; }   // 全体：他の選択を全解除
+              setSelDepts(function(prev) {
+                return prev.indexOf(d) !== -1
+                  ? prev.filter(function(x) { return x !== d; })
+                  : prev.concat([d]);
+              });
+            }} style={chipStyle(active, DC[d])}>{d}</button>;
+          })}
+        </div>
+        <div style={{ width: 1, height: 26, background: "#e8e6e0" }} />
+        <select value={selMonth} onChange={function(e) { setSelMonth(e.target.value); }}
+          style={{ padding: "8px 12px", border: "1px solid #d4d0c8", borderRadius: 8, fontSize: 13, background: "#fff" }}>
+          {months.length === 0 && <option value="">{"（データ未取込）"}</option>}
+          {months.map(function(m) { return <option key={m} value={m}>{m}</option>; })}
+        </select>
+        <button onClick={function() { run(false); }} disabled={loading || !selMonth}
+          style={{
+            padding: "9px 22px", background: loading || !selMonth ? "#bbb" : accent, color: "#fff",
+            border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600,
+            cursor: loading || !selMonth ? "default" : "pointer"
+          }}>{"レポート表示"}</button>
+        {report && !loading && (
+          <button onClick={function() { run(true); }}
+            style={{
+              padding: "9px 16px", background: "#fff", color: accent,
+              border: "1px solid " + accent, borderRadius: 10, fontSize: 13, fontWeight: 500, cursor: "pointer"
+            }}>{"🔄 再生成"}</button>
+        )}
+      </div>
+
+      {/* ローディング */}
+      {loading && (
+        <div style={{ marginTop: 16, padding: "28px 20px", textAlign: "center", background: "#fafaf8", borderRadius: 12, border: "1px solid #eee" }}>
+          <div style={{ fontSize: 15, color: "#666", fontWeight: 500 }}>{"🤖 AI分析中...（初回は30秒ほどかかります）"}</div>
+          <div style={{ fontSize: 12, color: "#aaa", marginTop: 6 }}>{selMonth + "「" + deptLabel + "」を分析しています"}</div>
+        </div>
+      )}
+
+      {/* エラー */}
+      {err && !loading && (
+        <div style={{ marginTop: 14, padding: "14px 18px", borderRadius: 10, background: "#fdf0ec", border: "1px solid #f0c4b4", color: "#c1440e", fontSize: 13, lineHeight: 1.6 }}>
+          {"⚠️ " + err}
+        </div>
+      )}
+
+      {/* レポート */}
+      {report && !loading && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+            <span style={{
+              fontSize: 11, fontWeight: 600, borderRadius: 6, padding: "3px 10px",
+              background: cached ? "#eef2f7" : "#eaf3ee",
+              color: cached ? "#4a6fa5" : "#1b4332"
+            }}>
+              {cached
+                ? ("💾 キャッシュから表示" + (generatedAt ? "（生成: " + generatedAt + "）" : ""))
+                : ("✨ 新規生成" + (generatedAt ? "（" + generatedAt + "）" : ""))}
+            </span>
+            <span style={{ fontSize: 11, color: "#aaa" }}>{deptLabel + "　" + selMonth + " 分析"}</span>
+          </div>
+
+          {report.summary && (
+            <div style={{ marginBottom: 16, padding: "16px 18px", borderRadius: 12, background: "rgba(27,67,50,.04)", border: "1px solid rgba(27,67,50,.1)" }}>
+              <div style={{ fontSize: 12, color: accent, fontWeight: 700, marginBottom: 6, letterSpacing: ".04em" }}>{"サマリー"}</div>
+              <div style={{ fontSize: 14, color: "#333", lineHeight: 1.75 }}>{report.summary}</div>
+            </div>
+          )}
+
+          {report.yoy && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: "#888", fontWeight: 700, marginBottom: 6, letterSpacing: ".04em" }}>{"📈 前年比"}</div>
+              <div style={{ fontSize: 13.5, color: "#444", lineHeight: 1.75, paddingLeft: 2 }}>{report.yoy}</div>
+            </div>
+          )}
+
+          {aiSection_("✅ ファクト（データが示す事実）", report.facts, "#1b4332")}
+          {aiSection_("💡 仮説（変動の要因）", report.hypotheses, "#b5651d")}
+          {aiSection_("📋 今後のタスク案", report.tasks, "#4a6fa5")}
+
+          <div style={{ marginTop: 14, fontSize: 10, color: "#ccc" }}>
+            {"※ AIによる分析です。数値の裏付けを確認のうえ経営判断にご活用ください。"}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// レポートの箇条書きセクション
+function aiSection_(title, items, color) {
+  if (!items || !Array.isArray(items) || items.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 12, color: "#888", fontWeight: 700, marginBottom: 8, letterSpacing: ".04em" }}>{title}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.map(function(it, i) {
+          return (
+            <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: color, marginTop: 7, flexShrink: 0 }} />
+              <div style={{ fontSize: 13.5, color: "#444", lineHeight: 1.7 }}>{String(it)}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
+// ════════════════════════════════════
 // Settings Panel
 // ════════════════════════════════════
 function SettingsPanel(props) {
@@ -316,7 +532,7 @@ function SettingsPanel(props) {
     if (!url) { setTestResult("❌ URLを入力してください"); return; }
     setTesting(true);
     setTestResult("");
-    fetch(url + "?action=ping")
+    fetch(url + "?action=getDailyData")
       .then(function(r) { return r.json(); })
       .then(function(d) {
         setTestResult(d.ok ? "✅ 接続成功！" : "⚠️ レスポンスエラー");
@@ -377,9 +593,11 @@ function DailyDashboard() {
   var _rng = useState({ s: "", e: "" }); var range = _rng[0]; var setRange = _rng[1];
   var _imp = useState("キッチン"); var impDept = _imp[0]; var setImpDept = _imp[1];
   var _cmp = useState(null); var compareMode = _cmp[0]; var setCompareMode = _cmp[1];
-  var _tbl = useState(false); var showTable = _tbl[0]; var setShowTable = _tbl[1];
+  var _tbl = useState(true); var showTable = _tbl[0]; var setShowTable = _tbl[1];
   var _sync = useState("idle"); var syncStatus = _sync[0]; var setSyncStatus = _sync[1];
   var _loaded = useState(false); var loaded = _loaded[0]; var setLoaded = _loaded[1];
+  var _pending = useState(null); var pendingImport = _pending[0]; var setPendingImport = _pending[1];
+  var _showMgmt = useState(false); var showDataMgmt = _showMgmt[0]; var setShowDataMgmt = _showMgmt[1];
 
   // 初回ロード: GASから取得 → なければlocalStorage
   useEffect(function() {
@@ -404,23 +622,44 @@ function DailyDashboard() {
   var handleImport = useCallback(function(text) {
     var rows = parseCSV(text).map(parseDailyRow).filter(Boolean);
     if (rows.length === 0) return;
+    var dateRange = rows[0].date + " 〜 " + rows[rows.length - 1].date;
+    var totalSales = rows.reduce(function(s, r) { return s + r.sales; }, 0);
+    setPendingImport({ rows: rows, dept: impDept, dateRange: dateRange, count: rows.length, totalSales: totalSales });
+  }, [impDept]);
+
+  var confirmImport = useCallback(function() {
+    if (!pendingImport) return;
+    var impRows = pendingImport.rows;
+    var impDeptName = pendingImport.dept;
+    setPendingImport(null);
     setData(function(prev) {
       var next = JSON.parse(JSON.stringify(prev));
-      if (!next[impDept]) next[impDept] = {};
-      rows.forEach(function(r) { next[impDept][r.date] = r; });
-
-      // Save to localStorage as backup
+      if (!next[impDeptName]) next[impDeptName] = {};
+      impRows.forEach(function(r) { next[impDeptName][r.date] = r; });
       try { localStorage.setItem("nk_daily3", JSON.stringify(next)); } catch(e) {}
-
-      // Sync to GAS
       setSyncStatus("syncing");
-      gasPost({ action: "saveDailyData", dept: impDept, rows: rows }).then(function(res) {
+      gasPost({ action: "saveDailyData", dept: impDeptName, rows: impRows }).then(function(res) {
         setSyncStatus(res ? "synced" : (getGasUrl() ? "error" : "idle"));
       });
-
       return next;
     });
-  }, [impDept]);
+  }, [pendingImport]);
+
+  var cancelImport = useCallback(function() { setPendingImport(null); }, []);
+
+  var deleteDeptMonth = useCallback(function(deptName, month) {
+    if (!window.confirm(deptName + " " + month + " のデータを削除しますか？")) return;
+    setData(function(prev) {
+      var next = JSON.parse(JSON.stringify(prev));
+      if (!next[deptName]) return next;
+      Object.keys(next[deptName]).forEach(function(dt) {
+        if (next[deptName][dt].m === month) delete next[deptName][dt];
+      });
+      if (Object.keys(next[deptName]).length === 0) delete next[deptName];
+      try { localStorage.setItem("nk_daily3", JSON.stringify(next)); } catch(e) {}
+      return next;
+    });
+  }, []);
 
   // === Computed values ===
   var allData = useMemo(function() {
@@ -443,10 +682,24 @@ function DailyDashboard() {
 
   var current = useMemo(function() {
     var src = dept === "全体" ? allData : (data[dept] || {});
-    var arr = Object.values(src).sort(function(a, b) { return a.date.localeCompare(b.date); });
-    if (range.s) arr = arr.filter(function(r) { return r.date >= range.s; });
-    if (range.e) arr = arr.filter(function(r) { return r.date <= range.e; });
-    return arr;
+    // 有効な date を持つ行のみを日付昇順で並べる
+    var base = Object.values(src)
+      .filter(function(r) { return r && r.date != null && String(r.date).trim() !== ""; })
+      .sort(function(a, b) { return cmpDate(a.date, b.date); });
+    try {
+      // 不正な日付（空文字・パース失敗）は無視して全期間扱いにフォールバック
+      var lo = normDate(range && range.s);
+      var hi = normDate(range && range.e);
+      // 開始 > 終了 の逆転入力（スピナー操作など）は入れ替えて許容する
+      if (lo && hi && lo > hi) { var _t = lo; lo = hi; hi = _t; }
+      var arr = base;
+      if (lo) arr = arr.filter(function(r) { var d = normDate(r.date); return d == null || d >= lo; });
+      if (hi) arr = arr.filter(function(r) { var d = normDate(r.date); return d == null || d <= hi; });
+      return arr;
+    } catch (e) {
+      console.error("[current] 日付フィルタ処理でエラー。全期間表示にフォールバックします:", e);
+      return base;
+    }
   }, [dept, data, allData, range]);
 
   var mi = METRICS.find(function(m) { return m.key === metric; });
@@ -456,6 +709,13 @@ function DailyDashboard() {
     var src = dept === "全体" ? allData : (data[dept] || {});
     return current.map(function(r) {
       var d = new Date(r.date);
+      // 日付が不正なら前年比較はスキップ（lastYear=null）してクラッシュを避ける
+      if (isNaN(d.getTime())) {
+        return {
+          label: String(r.date == null ? "" : r.date).slice(5), fullDate: r.date, dow: r.dow,
+          thisYear: r[metric], lastYear: null, lyDate: "", ratio: null
+        };
+      }
       var lyDate;
       if (compareMode === "date") {
         var ly = new Date(d); ly.setFullYear(ly.getFullYear() - 1);
@@ -467,7 +727,7 @@ function DailyDashboard() {
       var lyRow = src[lyDate];
       var tv = r[metric]; var lv = lyRow ? lyRow[metric] : null;
       return {
-        label: r.date.slice(5), fullDate: r.date, dow: r.dow,
+        label: String(r.date == null ? "" : r.date).slice(5), fullDate: r.date, dow: r.dow,
         thisYear: tv, lastYear: lv, lyDate: lyDate,
         ratio: (lv && lv > 0) ? tv / lv : null
       };
@@ -492,6 +752,19 @@ function DailyDashboard() {
 
   var cnt = Object.keys(data).reduce(function(s, d) { return s + Object.keys(data[d]).length; }, 0);
 
+  // AI分析レポート用: 取込済みデータの月一覧（"yyyy/MM"、降順）
+  var aiMonths = useMemo(function() {
+    var set = {};
+    Object.keys(data).forEach(function(dn) {
+      Object.values(data[dn]).forEach(function(r) {
+        var m = r.m;
+        if (!m || String(m).length > 7) m = r.date ? r.date.slice(0, 7) : null;
+        if (m) set[m] = true;
+      });
+    });
+    return Object.keys(set).sort(function(a, b) { return b.localeCompare(a); });
+  }, [data]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <Card>
@@ -506,20 +779,76 @@ function DailyDashboard() {
           })}
         </div>
         <FileUploader onUpload={handleImport} label={"「" + impDept + "」の日別売上CSVをドロップ（複数月OK）"} />
+        {pendingImport && (
+          <div style={{ marginTop: 14, padding: 16, borderRadius: 12, background: "#fffbf0", border: "2px solid #f0ad4e" }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: "#856404", marginBottom: 10 }}>{"⚠️ 取込内容の確認"}</div>
+            <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 12 }}>
+              <div><div style={{ fontSize: 11, color: "#888" }}>{"取込先部門"}</div><div style={{ fontSize: 16, fontWeight: 700, color: DC[pendingImport.dept] }}>{pendingImport.dept}</div></div>
+              <div><div style={{ fontSize: 11, color: "#888" }}>{"期間"}</div><div style={{ fontSize: 14, fontWeight: 600 }}>{pendingImport.dateRange}</div></div>
+              <div><div style={{ fontSize: 11, color: "#888" }}>{"件数"}</div><div style={{ fontSize: 14, fontWeight: 600 }}>{pendingImport.count + "日分"}</div></div>
+              <div><div style={{ fontSize: 11, color: "#888" }}>{"売上合計"}</div><div style={{ fontSize: 14, fontWeight: 600 }}>{fmtYen(pendingImport.totalSales)}</div></div>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={confirmImport} style={{ padding: "8px 24px", background: DC[pendingImport.dept], color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>{"✅ 「" + pendingImport.dept + "」として取り込む"}</button>
+              <button onClick={cancelImport} style={{ padding: "8px 24px", background: "#fff", color: "#666", border: "1px solid #ccc", borderRadius: 8, fontSize: 13, cursor: "pointer" }}>{"❌ キャンセル"}</button>
+            </div>
+          </div>
+        )}
         {cnt > 0 && (
-          <div style={{ marginTop: 10, fontSize: 12, color: "#888", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <span>{"💾 " + Object.keys(data).filter(function(k) { return Object.keys(data[k]).length > 0; }).join("・") + " 保持中（" + cnt + "日分）"}</span>
-            <button onClick={function() {
-              setData({});
-              try { localStorage.removeItem("nk_daily3"); } catch(e) {}
-            }}
-              style={{ fontSize: 11, color: "#c1440e", background: "none", border: "1px solid #c1440e", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>{"全削除"}</button>
+          <div style={{ marginTop: 10, fontSize: 12, color: "#888" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span>{"💾 " + Object.keys(data).filter(function(k) { return Object.keys(data[k]).length > 0; }).join("・") + " 保持中（" + cnt + "日分）"}</span>
+              <button onClick={function() { setShowDataMgmt(!showDataMgmt); }}
+                style={{ fontSize: 11, color: "#666", background: "none", border: "1px solid #ccc", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>
+                {showDataMgmt ? "▲ 閉じる" : "🗂️ データ管理"}
+              </button>
+            </div>
+            {showDataMgmt && (
+              <div style={{ marginTop: 10, padding: 14, borderRadius: 10, background: "#fafaf8", border: "1px solid #eee" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#333", marginBottom: 10 }}>{"部門×月別データ管理"}</div>
+                {["キッチン", "マーケット", "カフェ"].map(function(dName) {
+                  if (!data[dName] || Object.keys(data[dName]).length === 0) return null;
+                  var months = {};
+                  Object.values(data[dName]).forEach(function(r) {
+                    var mk = r.m;
+                    if (!mk || String(mk).length > 7) mk = r.date ? r.date.slice(0, 7) : "不明";
+                    if (!months[mk]) months[mk] = { count: 0, sales: 0 };
+                    months[mk].count++;
+                    months[mk].sales += r.sales;
+                  });
+                  return (
+                    <div key={dName} style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: DC[dName], marginBottom: 4 }}>{dName}</div>
+                      {Object.keys(months).sort().map(function(m) {
+                        return (
+                          <div key={m} style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0" }}>
+                            <span style={{ fontSize: 12, minWidth: 70 }}>{m}</span>
+                            <span style={{ fontSize: 11, color: "#888", minWidth: 50 }}>{months[m].count + "日"}</span>
+                            <span style={{ fontSize: 11, color: "#888", minWidth: 100 }}>{fmtYen(months[m].sales)}</span>
+                            <button onClick={function() { deleteDeptMonth(dName, m); }}
+                              style={{ fontSize: 10, color: "#c1440e", background: "none", border: "1px solid #c1440e", borderRadius: 4, padding: "1px 6px", cursor: "pointer" }}>{"削除"}</button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+                <div style={{ marginTop: 8, borderTop: "1px solid #eee", paddingTop: 8 }}>
+                  <button onClick={function() {
+                    if (window.confirm("全部門・全月のデータを削除しますか？")) {
+                      setData({});
+                      try { localStorage.removeItem("nk_daily3"); } catch(e) {}
+                    }
+                  }}
+                    style={{ fontSize: 11, color: "#c1440e", background: "none", border: "1px solid #c1440e", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>{"⚠️ 全データ削除"}</button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </Card>
 
-      {current.length > 0 && (
-        <>
+      <>
           <Card style={{ padding: "16px 24px" }}>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center" }}>
               <div style={{ display: "flex", gap: 6 }}>
@@ -535,12 +864,12 @@ function DailyDashboard() {
               </div>
               <div style={{ width: 1, height: 28, background: "#e8e6e0" }} />
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <input type="date" value={range.s.replace(/\//g, "-")}
-                  onChange={function(e) { setRange(function(p) { return { s: e.target.value.replace(/-/g, "/"), e: p.e }; }); }}
+                <input type="date" value={String(range.s || "").replace(/\//g, "-")}
+                  onChange={function(e) { var v = (e.target.value || "").replace(/-/g, "/"); setRange(function(p) { return { s: v, e: p.e }; }); }}
                   style={{ padding: "5px 8px", border: "1px solid #d4d0c8", borderRadius: 8, fontSize: 13 }} />
                 <span style={{ color: "#bbb" }}>{"\u301c"}</span>
-                <input type="date" value={range.e.replace(/\//g, "-")}
-                  onChange={function(e) { setRange(function(p) { return { s: p.s, e: e.target.value.replace(/-/g, "/") }; }); }}
+                <input type="date" value={String(range.e || "").replace(/\//g, "-")}
+                  onChange={function(e) { var v = (e.target.value || "").replace(/-/g, "/"); setRange(function(p) { return { s: p.s, e: v }; }); }}
                   style={{ padding: "5px 8px", border: "1px solid #d4d0c8", borderRadius: 8, fontSize: 13 }} />
                 {(range.s || range.e) && (
                   <button onClick={function() { setRange({ s: "", e: "" }); }}
@@ -550,6 +879,24 @@ function DailyDashboard() {
             </div>
           </Card>
 
+          {current.length === 0 ? (
+            <Card>
+              <div style={{ padding: "40px 20px", textAlign: "center", color: "#999" }}>
+                <div style={{ fontSize: 32, marginBottom: 10 }}>{"📭"}</div>
+                <div style={{ fontSize: 15, fontWeight: 600, color: "#666", marginBottom: 6 }}>{"該当期間にデータがありません"}</div>
+                <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+                  {(range.s || range.e)
+                    ? "選択中の期間・部門に一致する売上データがありません。期間を広げるか、下のボタンでフィルタを解除してください。"
+                    : "選択中の部門に売上データがありません。上部の部門ボタンで別の部門を選択してください。"}
+                </div>
+                {(range.s || range.e) && (
+                  <button onClick={function() { setRange({ s: "", e: "" }); }}
+                    style={{ marginTop: 14, padding: "8px 20px", background: "#1b4332", color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>{"✕ 期間フィルタを解除"}</button>
+                )}
+              </div>
+            </Card>
+          ) : (
+          <>
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
             <KPICard label="期間売上合計" value={fmtYen(kpis.s)} sub={kpis.d + "日間"} color="#1b4332" icon="💰" />
             <KPICard label="期間客数合計" value={kpis.c.toLocaleString() + "人"} sub={"日平均 " + Math.round(kpis.c / Math.max(kpis.d, 1)).toLocaleString() + "人"} color="#386641" icon="👥" />
@@ -564,7 +911,7 @@ function DailyDashboard() {
             <ResponsiveContainer width="100%" height={300}>
               <ComposedChart data={current} margin={{ left: 10, right: 10 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-                <XAxis dataKey="date" tickFormatter={function(v) { return v.slice(5); }} fontSize={11} tick={{ fill: "#888" }} />
+                <XAxis dataKey="date" tickFormatter={function(v) { return typeof v === "string" ? v.slice(5) : (v == null ? "" : String(v)); }} fontSize={11} tick={{ fill: "#888" }} />
                 <YAxis tickFormatter={mi.yFmt} fontSize={11} tick={{ fill: "#888" }} />
                 <Tooltip content={function(p) { return <ChartTooltip active={p.active} payload={p.payload} label={p.label} mi={mi} />; }} />
                 <defs>
@@ -586,16 +933,21 @@ function DailyDashboard() {
               <ResponsiveContainer width="100%" height={300}>
                 <LineChart margin={{ left: 10, right: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-                  <XAxis dataKey="date" tickFormatter={function(v) { return v.slice(5); }} fontSize={11} allowDuplicatedCategory={false} tick={{ fill: "#888" }} />
+                  <XAxis dataKey="date" tickFormatter={function(v) { return typeof v === "string" ? v.slice(5) : (v == null ? "" : String(v)); }} fontSize={11} allowDuplicatedCategory={false} tick={{ fill: "#888" }} />
                   <YAxis tickFormatter={mi.yFmt} fontSize={11} tick={{ fill: "#888" }} />
                   <Tooltip content={function(p) { return <ChartTooltip active={p.active} payload={p.payload} label={p.label} mi={mi} />; }} />
                   <Legend />
                   {["キッチン", "マーケット", "カフェ"].map(function(d) {
-                    var dd = data[d] ? Object.values(data[d]).sort(function(a, b) { return a.date.localeCompare(b.date); }).filter(function(r) {
-                      if (range.s && r.date < range.s) return false;
-                      if (range.e && r.date > range.e) return false;
-                      return true;
-                    }) : [];
+                    var _lo = normDate(range && range.s), _hi = normDate(range && range.e);
+                    var dd = data[d] ? Object.values(data[d])
+                      .filter(function(r) { return r && r.date != null && String(r.date).trim() !== ""; })
+                      .sort(function(a, b) { return cmpDate(a.date, b.date); })
+                      .filter(function(r) {
+                        var nd = normDate(r.date);
+                        if (_lo && nd != null && nd < _lo) return false;
+                        if (_hi && nd != null && nd > _hi) return false;
+                        return true;
+                      }) : [];
                     if (dd.length === 0) return null;
                     return <Line key={d} data={dd} dataKey={metric} name={d} stroke={DC[d]} strokeWidth={2} dot={false} type="monotone" />;
                   })}
@@ -709,7 +1061,18 @@ function DailyDashboard() {
                       <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
                       <XAxis dataKey="label" fontSize={10} tick={{ fill: "#888" }} interval={Math.max(0, Math.floor(yoyData.length / 20))} />
                       <YAxis tickFormatter={function(v) { return (v * 100).toFixed(0) + "%"; }} fontSize={11} tick={{ fill: "#888" }} />
-                      <Tooltip formatter={function(v) { return [(v * 100).toFixed(1) + "%", "前年比"]; }} />
+                      <Tooltip content={function(tp) {
+                        if (!tp.active || !tp.payload || tp.payload.length === 0) return null;
+                        var item = tp.payload[0].payload;
+                        return (
+                          <div style={{ background: "#fff", border: "1px solid #e8e6e0", borderRadius: 10, padding: "12px 16px", boxShadow: "0 4px 20px rgba(0,0,0,.08)", fontSize: 13 }}>
+                            <div style={{ fontWeight: 600, marginBottom: 6 }}>{item.label + "（" + item.dow + "）"}</div>
+                            <div style={{ fontWeight: 600, color: item.ratio != null && item.ratio >= 1 ? "#1b4332" : "#c1440e" }}>
+                              {"前年比 " + (item.ratio != null ? (item.ratio * 100).toFixed(1) + "%" : "—")}
+                            </div>
+                          </div>
+                        );
+                      }} />
                       <ReferenceLine y={1} stroke="#999" strokeDasharray="4 4" />
                       <Bar dataKey="ratio" name="前年比" maxBarSize={18} radius={[2, 2, 0, 0]}>
                         {yoyData.filter(function(r) { return r.ratio != null; }).map(function(r, i) {
@@ -791,8 +1154,11 @@ function DailyDashboard() {
               </div>
             )}
           </Card>
+          </>
+          )}
         </>
-      )}
+
+      {aiMonths.length > 0 && <AIReportCard type="daily" months={aiMonths} />}
     </div>
   );
 }
@@ -814,6 +1180,7 @@ function ProductDashboard() {
   var _metric = useState("sales"); var prodMetric = _metric[0]; var setProdMetric = _metric[1];
   var _sync = useState("idle"); var syncStatus = _sync[0]; var setSyncStatus = _sync[1];
   var _loaded = useState(false); var loaded = _loaded[0]; var setLoaded = _loaded[1];
+  var _showPeriods = useState(false); var showPeriodList = _showPeriods[0]; var setShowPeriodList = _showPeriods[1];
 
   // 初回ロード
   useEffect(function() {
@@ -837,6 +1204,18 @@ function ProductDashboard() {
   var periodKeys = useMemo(function() {
     return Object.keys(periods).sort(function(a, b) { return b.localeCompare(a); });
   }, [periods]);
+
+  // AI分析レポート用: 取込済み期間の月一覧（"yyyy/MM"、降順）
+  var aiMonths = useMemo(function() {
+    var set = {};
+    periodKeys.forEach(function(k) {
+      var m = String(k).match(/^(\d{4})(\d{2})\d{2}-/);
+      if (m) { set[m[1] + "/" + m[2]] = true; return; }
+      var p = periods[k];
+      if (p && p.shortLabel && /^\d{4}\/\d{2}/.test(p.shortLabel)) set[p.shortLabel.slice(0, 7)] = true;
+    });
+    return Object.keys(set).sort(function(a, b) { return b.localeCompare(a); });
+  }, [periodKeys, periods]);
 
   useEffect(function() {
     if (periodKeys.length >= 1 && !basePeriod) setBasePeriod(periodKeys[0]);
@@ -978,33 +1357,45 @@ function ProductDashboard() {
         <FileUploader onUpload={handleImport} label="商品別売上CSVをドロップ（複数ファイルOK）" />
 
         {periodKeys.length > 0 && (
-          <div style={{ marginTop: 14 }}>
-            <div style={{ fontSize: 12, color: "#666", marginBottom: 8, fontWeight: 500 }}>{"📂 取込済み期間："}</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {periodKeys.map(function(key, idx) {
-                var p = periods[key];
-                return (
-                  <div key={key} style={{
-                    display: "flex", alignItems: "center", justifyContent: "space-between",
-                    padding: "8px 14px", borderRadius: 10, background: "#fafaf8", border: "1px solid #eee"
-                  }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <div style={{ width: 10, height: 10, borderRadius: "50%", background: PERIOD_COLORS[idx] || "#999" }} />
-                      <span style={{ fontSize: 13, fontWeight: 500 }}>{p.label}</span>
-                      <span style={{ fontSize: 11, color: "#999" }}>{p.rows.length + "商品"}</span>
-                    </div>
-                    <button onClick={function() { removePeriod(key); }}
-                      style={{ fontSize: 11, color: "#c1440e", background: "none", border: "1px solid #c1440e", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>{"削除"}</button>
-                  </div>
-                );
-              })}
+          <div style={{ marginTop: 10, fontSize: 12, color: "#888" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 12, color: "#666", fontWeight: 500 }}>{"📂 取込済み期間：" + periodKeys.length + "件"}</span>
+              <button onClick={function() { setShowPeriodList(!showPeriodList); }}
+                style={{ fontSize: 11, color: "#666", background: "none", border: "1px solid #ccc", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>
+                {showPeriodList ? "▲ 閉じる" : "▼ 詳細"}
+              </button>
             </div>
-            <button onClick={function() {
-              setPeriods({});
-              setBasePeriod(""); setCmpPeriod1(""); setCmpPeriod2("");
-              try { localStorage.removeItem("nk_prod4"); } catch(e) {}
-            }}
-              style={{ marginTop: 8, fontSize: 11, color: "#c1440e", background: "none", border: "1px solid #c1440e", borderRadius: 4, padding: "3px 10px", cursor: "pointer" }}>{"全削除"}</button>
+            {showPeriodList && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {periodKeys.map(function(key, idx) {
+                    var p = periods[key];
+                    return (
+                      <div key={key} style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        padding: "8px 14px", borderRadius: 10, background: "#fafaf8", border: "1px solid #eee"
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <div style={{ width: 10, height: 10, borderRadius: "50%", background: PERIOD_COLORS[idx] || "#999" }} />
+                          <span style={{ fontSize: 13, fontWeight: 500 }}>{p.label}</span>
+                          <span style={{ fontSize: 11, color: "#999" }}>{p.rows.length + "商品"}</span>
+                        </div>
+                        <button onClick={function() { removePeriod(key); }}
+                          style={{ fontSize: 11, color: "#c1440e", background: "none", border: "1px solid #c1440e", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}>{"削除"}</button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <button onClick={function() {
+                  if (window.confirm("全期間のデータを削除しますか？")) {
+                    setPeriods({});
+                    setBasePeriod(""); setCmpPeriod1(""); setCmpPeriod2("");
+                    try { localStorage.removeItem("nk_prod4"); } catch(e) {}
+                  }
+                }}
+                  style={{ marginTop: 8, fontSize: 11, color: "#c1440e", background: "none", border: "1px solid #c1440e", borderRadius: 4, padding: "3px 10px", cursor: "pointer" }}>{"⚠️ 全削除"}</button>
+              </div>
+            )}
           </div>
         )}
       </Card>
@@ -1302,6 +1693,8 @@ function ProductDashboard() {
           </Card>
         </>
       )}
+
+      {aiMonths.length > 0 && <AIReportCard type="product" months={aiMonths} />}
     </div>
   );
 }

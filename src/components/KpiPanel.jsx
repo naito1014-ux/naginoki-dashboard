@@ -1,24 +1,23 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import * as XLSX from 'xlsx';
-import { gasGet, gasPostFull } from '../lib/gas';
 import {
-  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine
+  ComposedChart, Bar, Line, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine
 } from 'recharts';
+// ↓ 既存の src/lib/gas.js のエクスポート名に合わせてください
+import { gasGet, gasPostFull } from '../lib/gas';
 
 /* ══════════════════════════════════════════════════════════
    なぎの木テラス 経営指標タブ
-   - 会計ソフト出力の損益計算書(.xlsx)を取り込んで予実管理表を描画
+   - 損益計算書(.xlsx)を「期」ごとに切り分けて予実管理表を描画
+   - 期首は6月。1ファイルに前期の残シートと当期のシートが混在していても分離する
+   - 前期の期首月が当期シートに上書きされている場合は「前年」列から復元する
    - AI分析レポートは既存の getAnalysisReport (type:'pl') を利用
    ══════════════════════════════════════════════════════════ */
 
-const PL_KEY  = 'nk_pl1';
-const ACCENT  = '#4a6fa5';   // 経営指標タブの識別色（日別=#1b4332 / 商品別=#b5651d）
+const PL_KEY = 'nk_pl2';          // 期対応でスキーマが変わったため旧 nk_pl1 とは別キー
+const ACCENT = '#4a6fa5';
+const FY_START_MONTH = 6;         // 期首月
 
-/* ── 損益計算書(.xlsx)のパース ──────────────────────────
-   前提: 月次シート1行目に「令和X年M月1日～...」、2行目に部門見出し
-        （カフェ / マーケット / キッチン / 合計）、各部門は
-        [計画, 当期, 前期] の3列。科目行はA列が4桁コード。
-   ──────────────────────────────────────────────────── */
 const DEPT_ALIAS = [
   ['total',   ['合計', '合  計', '総合計']],
   ['cafe',    ['カフェ']],
@@ -26,26 +25,29 @@ const DEPT_ALIAS = [
   ['kitchen', ['キッチン']],
 ];
 const DEPT_NAMES = { total: '全体', cafe: 'カフェ', market: 'マーケット', kitchen: 'キッチン' };
-const FY_START_MONTH = 6;   // 期首月（なぎの木テラスは6月始まり）
+const DEPTS = ['total', 'cafe', 'market', 'kitchen'];
 const norm = v => String(v == null ? '' : v).replace(/[\s\u3000]/g, '');
+const ymOf = (y, m) => y + '-' + String(m).padStart(2, '0');
+const startYearOf = (y, m) => (m >= FY_START_MONTH ? y : y - 1);
 
 export function parsePlWorkbook(arrayBuffer, fileName) {
   const wb = XLSX.read(arrayBuffer, { type: 'array' });
-  const list = [];
   const accSet = {};
+  const real = {};        // ym -> dept -> acc -> [計画, 実績, 前年]
+  const recovered = {};   // ym -> dept -> acc -> [0, 実績, 0]（翌期シートの前年列から復元）
 
   wb.SheetNames.forEach(sn => {
-    if (norm(sn).indexOf('合計') === 0) return;             // 累計シートは読み飛ばす
+    if (norm(sn).indexOf('合計') === 0) return;          // 累計シートは読み飛ばす
     const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, defval: null });
     if (!rows.length) return;
 
-    const title = String((rows[0] && rows[0][0]) || '');
-    const md = title.match(/令和(\d+)年(\d+)月/);
+    const md = String((rows[0] && rows[0][0]) || '').match(/令和(\d+)年(\d+)月/);
     if (!md) return;
     const y = 2018 + parseInt(md[1], 10);
     const m = parseInt(md[2], 10);
+    const ym = ymOf(y, m);
+    const prevYm = ymOf(y - 1, m);
 
-    // 部門見出し行から列位置を検出
     const head = rows[1] || [];
     const col = {};
     head.forEach((cell, idx) => {
@@ -56,67 +58,77 @@ export function parsePlWorkbook(arrayBuffer, fileName) {
       });
     });
     if (col.total == null) return;
+    if (real[ym]) return;                                 // 同月の重複シートは先勝ち
 
-    const rec = { y, m, label: String(m).padStart(2, '0') + '月', acc: {} };
+    const cur = {}, prv = {};
+    DEPTS.forEach(d => { cur[d] = {}; prv[d] = {}; });
+
     rows.forEach(r => {
       if (!r || !/^\d{4}$/.test(String(r[0] || '').trim())) return;
       const name = String(r[1] || '').replace(/[\s\u3000]+$/, '').trim();
       if (!name) return;
-      const v = {};
-      Object.keys(col).forEach(k => {
-        const c = col[k];
-        v[k] = [0, 1, 2].map(o => (typeof r[c + o] === 'number' ? r[c + o] : 0));
-      });
-      rec.acc[name] = v;
       accSet[name] = 1;
-    });
-    list.push(rec);
-  });
-
-  if (!list.length) throw new Error('月次シートが見つかりませんでした。損益計算書のファイルか確認してください。');
-
-  /* 期首年の決定
-     会計ソフトの出力は一部シートの見出し年がずれていることがあるため、
-     「その月が属する期首年」の多数決で決めて全シートに振り直す。 */
-  const votes = {};
-  list.forEach(r => {
-    const cand = r.m >= FY_START_MONTH ? r.y : r.y - 1;
-    votes[cand] = (votes[cand] || 0) + 1;
-  });
-  let startYear = list[0].y, best = -1;
-  Object.keys(votes).forEach(k => {
-    if (votes[k] > best) { best = votes[k]; startYear = Number(k); }
-  });
-
-  const byPos = {};
-  list.forEach(r => {
-    r.pos = (r.m - FY_START_MONTH + 12) % 12;           // 期首からの経過月
-    r.y = r.m >= FY_START_MONTH ? startYear : startYear + 1;
-    r.ym = r.y + '-' + String(r.m).padStart(2, '0');
-    if (byPos[r.pos] == null) byPos[r.pos] = r;          // 月の重複は先勝ち
-  });
-  const months = Object.keys(byPos).map(Number).sort((a, b) => a - b).map(p => byPos[p]);
-
-  const accounts = Object.keys(accSet).sort();
-  const depts = ['total', 'cafe', 'market', 'kitchen'];
-  const data = {};
-  depts.forEach(d => {
-    data[d] = {};
-    accounts.forEach(a => {
-      data[d][a] = months.map(mo => {
-        const cell = mo.acc[a] && mo.acc[a][d];
-        return cell ? cell.map(x => Math.round(x)) : [0, 0, 0];
+      Object.keys(col).forEach(d => {
+        const c = col[d];
+        const n = o => (typeof r[c + o] === 'number' ? Math.round(r[c + o]) : 0);
+        cur[d][name] = [n(0), n(1), n(2)];
+        prv[d][name] = [0, n(2), 0];
       });
     });
+    real[ym] = cur;
+    if (!recovered[prevYm]) recovered[prevYm] = prv;
   });
+
+  const realYms = Object.keys(real);
+  if (!realYms.length) throw new Error('月次シートが見つかりませんでした。損益計算書のファイルか確認してください。');
+
+  // 実データのある月から期を洗い出す（前年列しかない期は作らない）
+  const seen = {};
+  realYms.forEach(ym => {
+    const parts = ym.split('-').map(Number);
+    seen[startYearOf(parts[0], parts[1])] = 1;
+  });
+  const years = Object.keys(seen).map(Number).sort((a, b) => b - a);   // 新しい期が先頭
 
   const fyM = String(fileName || '').match(/第?\s*(\d+)\s*期/);
-  const first = months[0], last = months[months.length - 1];
+  const latestNo = fyM ? parseInt(fyM[1], 10) : null;
+  const accounts = Object.keys(accSet).sort();
+
+  const periods = years.map((sy, idx) => {
+    const months = [];
+    for (let i = 0; i < 12; i++) {
+      const m = ((FY_START_MONTH - 1 + i) % 12) + 1;
+      const y = m >= FY_START_MONTH ? sy : sy + 1;
+      const ym = ymOf(y, m);
+      const src = real[ym] || recovered[ym] || null;
+      months.push({
+        ym, label: String(m).padStart(2, '0') + '月',
+        has: !!src, recovered: !real[ym] && !!recovered[ym], src,
+      });
+    }
+    const data = {};
+    DEPTS.forEach(d => {
+      data[d] = {};
+      accounts.forEach(a => {
+        data[d][a] = months.map(mo => (mo.src && mo.src[d] && mo.src[d][a]) || [0, 0, 0]);
+      });
+    });
+    const no = latestNo != null ? latestNo - idx : null;
+    return {
+      key: String(sy),
+      label: no != null ? '第' + no + '期' : sy + '年度',
+      period: sy + '年06月 〜 ' + (sy + 1) + '年05月',
+      filled: months.filter(mo => mo.has).length,
+      recoveredCount: months.filter(mo => mo.recovered).length,
+      months: months.map(mo => ({ ym: mo.ym, label: mo.label, has: mo.has, recovered: mo.recovered })),
+      data,
+    };
+  });
+
   return {
-    fy: fyM ? '第' + fyM[1] + '期' : '',
-    period: first.ym.replace('-', '年') + '月 〜 ' + last.ym.replace('-', '年') + '月',
-    months: months.map(m => ({ ym: m.ym, label: m.label })),
-    depts, deptNames: DEPT_NAMES, accounts, data,
+    fyStartMonth: FY_START_MONTH,
+    periods, accounts,
+    deptNames: DEPT_NAMES, depts: DEPTS,
     updatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
   };
 }
@@ -126,14 +138,21 @@ const HR   = ['役員報酬', '給料手当', '雑給', '賞与', '退職金', '
 const VARC = ['荷造運賃', '支払手数料', '消耗品費', '衛生費'];
 const SEMI = ['雑給', '水道光熱費'];
 
-function makePick(pl, dept, mIdx) {
-  const src = (pl.data && pl.data[dept]) || {};
+// mIdx = 月インデックス / null なら期の累計（データのある月だけ足す）
+// skipRecovered = true のとき、前年列から復元した月（計画も前年も持たない）を除外する
+function makePick(period, dept, mIdx, skipRecovered) {
+  const src = (period.data && period.data[dept]) || {};
+  const ms = period.months;
   return acc => {
     const rows = src[acc];
     if (!rows) return [0, 0, 0];
     if (mIdx === null) {
       const t = [0, 0, 0];
-      rows.forEach(x => { t[0] += x[0]; t[1] += x[1]; t[2] += x[2]; });
+      rows.forEach((x, i) => {
+        if (!ms[i].has) return;
+        if (skipRecovered && ms[i].recovered) return;
+        t[0] += x[0]; t[1] += x[1]; t[2] += x[2];
+      });
       return t;
     }
     return rows[mIdx] || [0, 0, 0];
@@ -224,25 +243,24 @@ function StatCard({ label, value, unit, sub, color }) {
   );
 }
 
-/* ── AI分析レポート（型は既存 getAnalysisReport と共通） ── */
-function PlAnalysis({ pl, dept, monthKey, snapshot }) {
+/* ── AI分析レポート ─────────────────────────────────── */
+function PlAnalysis({ periodLabel, dept, monthLabel, snapshot }) {
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState(null);
   const [err, setErr] = useState('');
   const [cached, setCached] = useState(false);
   const [genAt, setGenAt] = useState('');
   const deptLabel = DEPT_NAMES[dept];
-  const monthLabel = monthKey === 'FY' ? '年度累計' : monthKey;
+  const target = periodLabel + ' ' + monthLabel;
 
-  useEffect(() => { setReport(null); setErr(''); }, [dept, monthKey]);
+  useEffect(() => { setReport(null); setErr(''); }, [dept, monthLabel, periodLabel]);
 
   function run(force) {
     setLoading(true); setErr('');
     if (force) setReport(null);
     gasPostFull({
       action: 'getAnalysisReport', type: 'pl',
-      dept: deptLabel, month: monthLabel, force: !!force,
-      kpi: snapshot,
+      dept: deptLabel, month: target, force: !!force, kpi: snapshot,
     }).then(res => {
       setLoading(false);
       if (!res || !res.ok) { setErr((res && res.error) || 'レポートの取得に失敗しました'); return; }
@@ -288,7 +306,7 @@ function PlAnalysis({ pl, dept, monthKey, snapshot }) {
       {loading && (
         <div style={{ marginTop: 16, padding: '28px 20px', textAlign: 'center', background: '#fafaf8', borderRadius: 12, border: '1px solid #eee' }}>
           <div style={{ fontSize: 15, color: '#666', fontWeight: 500 }}>🤖 AI分析中...（初回は30秒ほどかかります）</div>
-          <div style={{ fontSize: 12, color: '#aaa', marginTop: 6 }}>{deptLabel}「{monthLabel}」を分析しています</div>
+          <div style={{ fontSize: 12, color: '#aaa', marginTop: 6 }}>{deptLabel}「{target}」を分析しています</div>
         </div>
       )}
       {err && !loading && (
@@ -302,7 +320,7 @@ function PlAnalysis({ pl, dept, monthKey, snapshot }) {
                            background: cached ? '#eef2f7' : '#eaf3ee', color: cached ? '#4a6fa5' : '#1b4332' }}>
               {cached ? '💾 キャッシュから表示' : '✨ 新規生成'}{genAt ? '（' + genAt + '）' : ''}
             </span>
-            <span style={{ fontSize: 11, color: '#aaa' }}>{deptLabel}　{monthLabel} 分析</span>
+            <span style={{ fontSize: 11, color: '#aaa' }}>{deptLabel}　{target} 分析</span>
           </div>
           {report.summary && (
             <div style={{ marginBottom: 16, padding: '16px 18px', borderRadius: 12,
@@ -332,23 +350,30 @@ function PlAnalysis({ pl, dept, monthKey, snapshot }) {
 /* ── 本体 ───────────────────────────────────────────── */
 export default function KpiPanel() {
   const [pl, setPl] = useState(null);
+  const [pKey, setPKey] = useState('');
   const [dept, setDept] = useState('total');
-  const [mode, setMode] = useState('plan');    // plan | prior | ratio
-  const [unit, setUnit] = useState('k');       // k | yen
-  const [monthKey, setMonthKey] = useState('FY');
+  const [mode, setMode] = useState('plan');
+  const [unit, setUnit] = useState('k');
+  const [monthIdx, setMonthIdx] = useState(-1);      // -1 = 期累計
   const [msg, setMsg] = useState('');
   const [drag, setDrag] = useState(false);
+  const [loadingData, setLoadingData] = useState(true);
   const fileRef = useRef(null);
 
-  // 初回ロード: GAS → localStorage の順
   useEffect(() => {
-    gasGet('getPlData').then(res => {
-      if (res && res.pl && res.pl.months && res.pl.months.length) { setPl(res.pl); return; }
-      try {
-        const raw = localStorage.getItem(PL_KEY);
-        if (raw) setPl(JSON.parse(raw));
-      } catch { /* noop */ }
-    });
+    const apply = data => {
+      if (!data || !data.periods || !data.periods.length) return false;
+      setPl(data);
+      setPKey(data.periods[0].key);
+      return true;
+    };
+    Promise.resolve(gasGet('getPlData')).then(res => {
+      if (!apply(res && res.pl)) {
+        try { apply(JSON.parse(localStorage.getItem(PL_KEY))); } catch { /* noop */ }
+      }
+    }).catch(() => {
+      try { apply(JSON.parse(localStorage.getItem(PL_KEY))); } catch { /* noop */ }
+    }).then(() => setLoadingData(false));
   }, []);
 
   const handleFiles = useCallback(files => {
@@ -360,22 +385,33 @@ export default function KpiPanel() {
       try { parsed = parsePlWorkbook(buf, f.name); }
       catch (e) { setMsg('❌ ' + (e.message || '読み込みに失敗しました')); return; }
       setPl(parsed);
-      setMonthKey('FY');
+      setPKey(parsed.periods[0].key);
+      setMonthIdx(-1);
       try { localStorage.setItem(PL_KEY, JSON.stringify(parsed)); } catch { /* noop */ }
-      setMsg('✅ ' + parsed.months.length + 'ヶ月分を取り込みました（' + parsed.period + '）');
+      setMsg('✅ ' + parsed.periods.map(p => p.label + '（' + p.filled + 'ヶ月）').join('、') + ' を取り込みました');
       gasPostFull({ action: 'savePlData', pl: parsed }).then(r => {
         if (!r || !r.ok) setMsg(m => m + '　※スプレッドシートへの保存は未完了です');
       });
     });
   }, []);
 
-  const months = (pl && pl.months) || [];
-  const fyPick = useMemo(() => (pl ? makePick(pl, dept, null) : null), [pl, dept]);
-  const mPicks = useMemo(() => (pl ? months.map((_, i) => makePick(pl, dept, i)) : []), [pl, dept, months]);
+  const period = useMemo(
+    () => (pl ? pl.periods.find(p => p.key === pKey) || pl.periods[0] : null),
+    [pl, pKey]
+  );
+  const months = (period && period.months) || [];
+  const fyPick = useMemo(() => (period ? makePick(period, dept, null) : null), [period, dept]);
+  const cmpPick = useMemo(
+    () => (period ? makePick(period, dept, null, true) : null),
+    [period, dept]
+  );
+  const mPicks = useMemo(
+    () => (period ? months.map((_, i) => makePick(period, dept, i)) : []),
+    [period, dept, months]
+  );
 
-  // AI分析に渡すKPIスナップショット
   const snapshot = useMemo(() => {
-    if (!pl) return null;
+    if (!period) return null;
     const kpiOf = v => ({
       売上: Math.round(M.sales(v, 1)), 計画: Math.round(M.sales(v, 0)), 前年: Math.round(M.sales(v, 2)),
       原価率: +M.cogsRate(v, 1).toFixed(1), 粗利率: +M.grossRate(v, 1).toFixed(1),
@@ -386,40 +422,48 @@ export default function KpiPanel() {
       EBITDA: Math.round(M.ebitda(v, 1)),
       損益分岐点売上: Math.round(M.bep(v, 1)), 損益分岐点比率: +M.bepRatio(v, 1).toFixed(1),
     });
-    const idx = monthKey === 'FY' ? null : months.findIndex(m => m.ym === monthKey);
-    const target = idx === null || idx < 0 ? fyPick : mPicks[idx];
-    return {
-      期: pl.fy, 期間: pl.period, 部門: DEPT_NAMES[dept],
-      対象: monthKey === 'FY' ? '年度累計' : monthKey,
-      対象KPI: kpiOf(target),
-      年度累計KPI: kpiOf(fyPick),
-      月次推移: months.map((m, i) => ({
+    const target = monthIdx < 0 ? fyPick : mPicks[monthIdx];
+    const trend = [];
+    months.forEach((m, i) => {
+      if (!m.has) return;
+      trend.push({
         月: m.ym, 売上: Math.round(M.sales(mPicks[i], 1)), 計画: Math.round(M.sales(mPicks[i], 0)),
         前年: Math.round(M.sales(mPicks[i], 2)), 営業利益: Math.round(M.opInc(mPicks[i], 1)),
         損益分岐点比率: +M.bepRatio(mPicks[i], 1).toFixed(1),
+      });
+    });
+    return {
+      期: period.label, 期間: period.period, 確定月数: period.filled, 部門: DEPT_NAMES[dept],
+      対象: monthIdx < 0 ? '期累計（' + period.filled + 'ヶ月）' : months[monthIdx].ym,
+      対象KPI: kpiOf(target),
+      期累計KPI: kpiOf(fyPick),
+      月次推移: trend,
+      部門別: DEPTS.filter(d => d !== 'total').map(d => ({
+        部門: DEPT_NAMES[d], ...kpiOf(makePick(period, d, null)),
       })),
-      部門別年度: pl.depts.filter(d => d !== 'total').map(d => {
-        const v = makePick(pl, d, null);
-        return { 部門: DEPT_NAMES[d], ...kpiOf(v) };
-      }),
     };
-  }, [pl, dept, monthKey, months, fyPick, mPicks]);
+  }, [period, dept, monthIdx, months, fyPick, mPicks]);
 
-  const chartData = useMemo(() => months.map((m, i) => ({
-    name: m.label,
-    売上: Math.round(M.sales(mPicks[i], 1) / 1000),
-    計画: Math.round(M.sales(mPicks[i], 0) / 1000),
-    前年: Math.round(M.sales(mPicks[i], 2) / 1000),
-    営業利益: Math.round(M.opInc(mPicks[i], 1) / 1000),
-  })), [months, mPicks]);
+  const chartData = useMemo(
+    () => months.map((m, i) => (m.has ? {
+      name: m.label,
+      売上: Math.round(M.sales(mPicks[i], 1) / 1000),
+      計画: Math.round(M.sales(mPicks[i], 0) / 1000) || null,
+      前年: Math.round(M.sales(mPicks[i], 2) / 1000) || null,
+      営業利益: Math.round(M.opInc(mPicks[i], 1) / 1000),
+    } : { name: m.label, 売上: null, 計画: null, 前年: null, 営業利益: null })),
+    [months, mPicks]
+  );
 
-  /* ── 未取込のとき ── */
+  /* ── 未取込 ── */
   if (!pl) {
     return (
       <div style={cardBox()}>
         <h3 style={{ margin: '0 0 8px', fontSize: 15, color: '#333', fontWeight: 600 }}>💹 経営指標</h3>
         <div style={{ fontSize: 12, color: '#888', marginBottom: 16, lineHeight: 1.6 }}>
-          会計ソフトから出力した損益計算書（.xlsx）をドロップすると、部門別の予実管理表とAI分析が使えるようになります。
+          {loadingData
+            ? '読み込み中…'
+            : '会計ソフトから出力した損益計算書（.xlsx）をドロップすると、期ごとの予実管理表とAI分析が使えるようになります。期首は6月として集計します。'}
         </div>
         <div
           onDragOver={e => { e.preventDefault(); setDrag(true); }}
@@ -437,46 +481,65 @@ export default function KpiPanel() {
     );
   }
 
-  /* ── 予実テーブル ── */
-  const cellOf = (row, v, isFy, key) => {
+  const cellOf = (row, v, isFy, key, has, cmp) => {
+    const base = {
+      borderBottom: '1px solid #eee', padding: '7px 10px', textAlign: 'right',
+      fontVariantNumeric: 'tabular-nums', lineHeight: 1.35,
+      background: isFy ? (row.grp ? '#efece4' : '#faf8f4') : row.hl ? '#fdf5f0' : row.grp ? '#f4f2ec' : 'transparent',
+      borderLeft: isFy ? '2px solid #d4d0c8' : 'none', fontWeight: row.grp || isFy ? 700 : 400,
+      color: row.dim ? '#999' : '#333',
+    };
+    if (!has) return <td key={key} style={{ ...base, color: '#d4d0c8', fontWeight: 400 }}>–</td>;
+
     const act = M[row.k](v, 1);
     const top = row.t === 'money' ? money(act, unit) : act.toFixed(1) + '%';
     let sub = '', color = '#aaa';
     if (mode === 'ratio') {
       if (row.t === 'money') sub = rate(act, M.sales(v, 1)).toFixed(1) + '%';
     } else {
-      const base = M[row.k](v, mode === 'plan' ? 0 : 2);
-      if (base !== 0 || act !== 0) {
-        const d = act - base;
+      // cmp が渡された場合は、計画・前年を持つ月だけで差を取る
+      const cv = cmp || v;
+      const b = M[row.k](cv, mode === 'plan' ? 0 : 2);
+      if (b !== 0) {
+        const d = M[row.k](cv, 1) - b;
         sub = row.t === 'money' ? signed(d, x => money(x, unit)) : signed(d, x => x.toFixed(1) + 'pt');
         color = diffColor(row.t === 'money' ? d / 1000 : d, LOWER_BETTER[row.k]);
       }
     }
     return (
-      <td key={key} style={{
-        borderBottom: '1px solid #eee', padding: '7px 10px', textAlign: 'right',
-        fontVariantNumeric: 'tabular-nums', lineHeight: 1.35,
-        background: isFy ? (row.grp ? '#efece4' : '#faf8f4') : row.hl ? '#fdf5f0' : row.grp ? '#f4f2ec' : 'transparent',
-        borderLeft: isFy ? '2px solid #d4d0c8' : 'none', fontWeight: row.grp || isFy ? 700 : 400,
-        color: row.dim ? '#999' : '#333',
-      }}>
+      <td key={key} style={base} title={cmp ? '差は計画・前年のある月のみで算出' : undefined}>
         <span style={{ display: 'block' }}>{top}</span>
         {sub && <span style={{ display: 'block', fontSize: 10.5, fontWeight: 600, marginTop: 1, color }}>{sub}</span>}
       </td>
     );
   };
 
-  const s = M.sales(fyPick, 1), sp = M.sales(fyPick, 0), sy = M.sales(fyPick, 2);
-  const op = M.opInc(fyPick, 1), opp = M.opInc(fyPick, 0);
+  const cmpOn = period.recoveredCount > 0 && mode !== 'ratio';
+  const s = M.sales(fyPick, 1);
+  const sp = M.sales(cmpPick, 0), sy = M.sales(cmpPick, 2), sCmp = M.sales(cmpPick, 1);
+  const op = M.opInc(fyPick, 1);
+  const opp = M.opInc(cmpPick, 0), opCmp = M.opInc(cmpPick, 1);
   const bepR = M.bepRatio(fyPick, 1);
   const modeLabel = mode === 'plan' ? '計画との差' : mode === 'prior' ? '前年との差' : '売上構成比';
+  const cum = period.filled === 12 ? '通期' : period.filled + 'ヶ月累計';
 
   return (
     <div>
-      {/* 操作バー */}
+      {/* 期・部門・表示の切替 */}
       <div style={cardBox({ padding: 18, marginBottom: 16 })}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+          {pl.periods.map(p => (
+            <button key={p.key} onClick={() => { setPKey(p.key); setMonthIdx(-1); }} style={pill(pKey === p.key, ACCENT)}>
+              {p.label}
+              <span style={{ fontSize: 11, marginLeft: 6, opacity: .75 }}>
+                {p.filled === 12 ? '通期' : p.filled + 'ヶ月'}
+              </span>
+            </button>
+          ))}
+          <span style={{ fontSize: 11.5, color: '#aaa', marginLeft: 4 }}>{period.period}</span>
+        </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          {pl.depts.map(d => (
+          {DEPTS.map(d => (
             <button key={d} onClick={() => setDept(d)} style={pill(dept === d)}>{DEPT_NAMES[d]}</button>
           ))}
           <div style={{ width: 1, height: 22, background: '#e8e6e0', margin: '0 4px' }} />
@@ -487,18 +550,16 @@ export default function KpiPanel() {
           {[['k', '千円'], ['yen', '円']].map(([k, l]) => (
             <button key={k} onClick={() => setUnit(k)} style={pill(unit === k)}>{l}</button>
           ))}
-          <div style={{ marginLeft: 'auto', fontSize: 11, color: '#aaa' }}>
-            {pl.fy} {pl.period}　上段＝実績／下段＝{modeLabel}
-          </div>
+          <div style={{ marginLeft: 'auto', fontSize: 11, color: '#aaa' }}>上段＝実績／下段＝{modeLabel}</div>
         </div>
       </div>
 
-      {/* サマリーカード */}
+      {/* サマリー */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-        <StatCard label="純売上高" value={cma(s / 1000)} unit="千円" color="#1b4332"
-                  sub={'計画比 ' + rate(s, sp).toFixed(1) + '%　前年比 ' + rate(s, sy).toFixed(0) + '%'} />
+        <StatCard label={'純売上高（' + cum + '）'} value={cma(s / 1000)} unit="千円" color="#1b4332"
+                  sub={(sp ? '計画比 ' + rate(sCmp, sp).toFixed(1) + '%　' : '') + (sy ? '前年比 ' + rate(sCmp, sy).toFixed(0) + '%' : '')} />
         <StatCard label="営業利益" value={cma(op / 1000)} unit="千円" color={op >= 0 ? '#386641' : '#c1440e'}
-                  sub={'計画差 ' + signed((op - opp) / 1000, cma) + '千円'} />
+                  sub={opp ? '計画差 ' + signed((opCmp - opp) / 1000, cma) + '千円' : '計画データなし'} />
         <StatCard label="EBITDA（償却前）" value={cma(M.ebitda(fyPick, 1) / 1000)} unit="千円" color="#4a6fa5"
                   sub={'減価償却 ' + cma(M.dep(fyPick, 1) / 1000) + '千円を加算'} />
         <StatCard label="労働分配率" value={M.laborShare(fyPick, 1).toFixed(1)} unit="%" color="#b5651d"
@@ -516,11 +577,13 @@ export default function KpiPanel() {
                 <th style={{ background: '#f8f7f4', borderBottom: '1px solid #d4d0c8', padding: '10px', textAlign: 'left',
                              position: 'sticky', left: 0, zIndex: 3, fontSize: 11.5, color: '#4a463f', minWidth: 130 }}>項目</th>
                 {months.map(m => (
-                  <th key={m.ym} style={{ background: '#f8f7f4', borderBottom: '1px solid #d4d0c8', padding: '10px',
-                                          textAlign: 'right', fontSize: 11.5, color: '#4a463f' }}>{m.label}</th>
+                  <th key={m.ym} title={m.ym} style={{ background: '#f8f7f4', borderBottom: '1px solid #d4d0c8', padding: '10px',
+                                                       textAlign: 'right', fontSize: 11.5, color: m.has ? '#4a463f' : '#c4bfb4' }}>
+                    {m.label}{m.recovered ? <span style={{ fontSize: 9, color: '#b5651d', marginLeft: 2 }}>*</span> : null}
+                  </th>
                 ))}
                 <th style={{ background: '#f2efe9', borderBottom: '1px solid #d4d0c8', borderLeft: '2px solid #d4d0c8',
-                             padding: '10px', textAlign: 'right', fontSize: 11.5, color: '#4a463f' }}>年度合計</th>
+                             padding: '10px', textAlign: 'right', fontSize: 11.5, color: '#4a463f' }}>{cum}</th>
               </tr>
             </thead>
             <tbody>
@@ -530,14 +593,19 @@ export default function KpiPanel() {
                                paddingLeft: row.ch ? 24 : 10, position: 'sticky', left: 0, zIndex: 1,
                                background: row.hl ? '#fdf5f0' : row.grp ? '#f4f2ec' : '#fff',
                                fontWeight: row.grp ? 700 : 400, color: row.dim ? '#999' : '#333' }}>{row.lab}</td>
-                  {mPicks.map((v, i) => cellOf(row, v, false, i))}
-                  {cellOf(row, fyPick, true, 'fy')}
+                  {mPicks.map((v, i) => cellOf(row, v, false, i, months[i].has))}
+                  {cellOf(row, fyPick, true, 'fy', true, cmpOn ? cmpPick : null)}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </div>
+      {period.recoveredCount > 0 && (
+        <div style={{ marginTop: 8, fontSize: 11, color: '#b5651d' }}>
+          * 印の月は、翌期シートの前年列から復元した実績です。計画と前年を持たないため、累計の差と計画比・前年比はこの月を除いて算出しています。
+        </div>
+      )}
 
       {/* チャート */}
       <div style={cardBox({ marginTop: 16 })}>
@@ -552,8 +620,8 @@ export default function KpiPanel() {
               <Tooltip formatter={v => cma(v) + '千円'} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
               <Bar dataKey="売上" fill="#c1440e" radius={[3, 3, 0, 0]} barSize={22} />
-              <Line dataKey="計画" stroke="#1b4332" strokeWidth={2} dot={{ r: 3 }} />
-              <Line dataKey="前年" stroke="#9a958a" strokeWidth={1.4} strokeDasharray="4 3" dot={false} />
+              <Line dataKey="計画" stroke="#1b4332" strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
+              <Line dataKey="前年" stroke="#9a958a" strokeWidth={1.4} strokeDasharray="4 3" dot={false} connectNulls={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -565,18 +633,12 @@ export default function KpiPanel() {
               <YAxis tick={{ fontSize: 11, fill: '#888' }} axisLine={false} tickLine={false} width={56} />
               <Tooltip formatter={v => cma(v) + '千円'} />
               <ReferenceLine y={0} stroke="#c9c4b8" />
-              <Bar dataKey="営業利益" radius={[3, 3, 0, 0]} barSize={22}
-                   fill="#386641"
-                   shape={props => {
-                     // 赤字月は height が負で渡ってくる。<rect> は負の高さを描画しないので基準線から下向きに正規化する。
-                     const neg = props.height < 0;
-                     const h = Math.abs(props.height);
-                     return (
-                       <rect x={props.x} y={neg ? props.y + props.height : props.y}
-                             width={props.width} height={h}
-                             rx={Math.min(3, h)} fill={props.payload.営業利益 >= 0 ? '#386641' : '#c1440e'} />
-                     );
-                   }} />
+              {/* 負値バーは Cell で色分けする。カスタム shape は height が負のまま渡り描画されない */}
+              <Bar dataKey="営業利益" radius={[3, 3, 0, 0]} barSize={22}>
+                {chartData.map((d, i) => (
+                  <Cell key={i} fill={(d.営業利益 || 0) >= 0 ? '#386641' : '#c1440e'} />
+                ))}
+              </Bar>
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -585,19 +647,29 @@ export default function KpiPanel() {
       {/* AI分析 */}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '20px 0 -8px' }}>
         <span style={{ fontSize: 12, color: '#888' }}>分析対象</span>
-        <button onClick={() => setMonthKey('FY')} style={pill(monthKey === 'FY', ACCENT)}>年度累計</button>
-        {months.map(m => (
-          <button key={m.ym} onClick={() => setMonthKey(m.ym)} style={pill(monthKey === m.ym, ACCENT)}>{m.label}</button>
-        ))}
+        <button onClick={() => setMonthIdx(-1)} style={pill(monthIdx === -1, ACCENT)}>{cum}</button>
+        {months.map((m, i) => (m.has
+          ? <button key={m.ym} onClick={() => setMonthIdx(i)} style={pill(monthIdx === i, ACCENT)}>{m.label}</button>
+          : null))}
       </div>
-      <PlAnalysis pl={pl} dept={dept} monthKey={monthKey} snapshot={snapshot} />
+      <PlAnalysis
+        periodLabel={period.label}
+        dept={dept}
+        monthLabel={monthIdx < 0 ? cum : months[monthIdx].ym}
+        snapshot={snapshot}
+      />
 
       {/* データ管理 */}
       <div style={cardBox({ marginTop: 16 })}>
         <h3 style={{ margin: '0 0 10px', fontSize: 14, color: '#333', fontWeight: 600 }}>損益計算書データ</h3>
-        <div style={{ fontSize: 12, color: '#888', marginBottom: 12, lineHeight: 1.7 }}>
-          {pl.fy} {pl.period}（{months.length}ヶ月）{pl.updatedAt ? '　最終取込 ' + pl.updatedAt : ''}<br />
-          新しい月が確定したら、更新後の損益計算書を取り込み直してください。
+        <div style={{ fontSize: 12, color: '#888', marginBottom: 12, lineHeight: 1.8 }}>
+          {pl.periods.map(p => (
+            <div key={p.key}>
+              {p.label}　{p.period}　{p.filled === 12 ? '通期確定' : p.filled + 'ヶ月確定'}
+              {p.recoveredCount > 0 ? '（うち' + p.recoveredCount + 'ヶ月は前年列から復元）' : ''}
+            </div>
+          ))}
+          {pl.updatedAt && <div style={{ color: '#bbb' }}>最終取込 {pl.updatedAt}</div>}
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button onClick={() => fileRef.current && fileRef.current.click()} style={pill(true)}>ファイルを取り込む</button>
@@ -610,6 +682,7 @@ export default function KpiPanel() {
         </div>
         {msg && <div style={{ marginTop: 10, fontSize: 13, color: msg.startsWith('✅') ? '#1b4332' : '#c1440e' }}>{msg}</div>}
         <div style={{ marginTop: 14, fontSize: 10.5, color: '#bbb', lineHeight: 1.8 }}>
+          期首6月で期を区切っています。1つのファイルに前期の残シートと当期のシートが混在していても、見出しの年月をもとに期ごとに分けて集計します。<br />
           人件費＝役員報酬・給料手当・雑給・賞与・退職金・法定福利費・福利厚生費／労働分配率＝人件費÷売上総利益／FL比率＝（売上原価＋人件費）÷純売上高／EBITDA＝営業利益＋減価償却費。
           損益分岐点は勘定科目法（変動費＝売上原価・荷造運賃・支払手数料・消耗品費・衛生費、雑給と水道光熱費は50%を変動費として算入）。
         </div>

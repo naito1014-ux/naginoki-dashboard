@@ -412,29 +412,50 @@ export default function KpiPanel() {
 
   const snapshot = useMemo(() => {
     if (!period) return null;
+    // すべての指標を { 実績, 前年 } の対で渡す。計画は乖離が大きく分析に使わないため含めない
+    const pair = (v, fn, round) => ({
+      実績: round ? Math.round(fn(v, 1)) : +fn(v, 1).toFixed(1),
+      前年: round ? Math.round(fn(v, 2)) : +fn(v, 2).toFixed(1),
+    });
     const kpiOf = v => ({
-      売上: Math.round(M.sales(v, 1)), 計画: Math.round(M.sales(v, 0)), 前年: Math.round(M.sales(v, 2)),
-      原価率: +M.cogsRate(v, 1).toFixed(1), 粗利率: +M.grossRate(v, 1).toFixed(1),
-      人件費: Math.round(M.labor(v, 1)), 人件費率: +M.laborRate(v, 1).toFixed(1),
-      労働分配率: +M.laborShare(v, 1).toFixed(1), FL比率: +M.fl(v, 1).toFixed(1),
-      販管費: Math.round(M.sga(v, 1)), 減価償却費: Math.round(M.dep(v, 1)),
-      営業利益: Math.round(M.opInc(v, 1)), 営業利益計画: Math.round(M.opInc(v, 0)),
-      EBITDA: Math.round(M.ebitda(v, 1)),
-      損益分岐点売上: Math.round(M.bep(v, 1)), 損益分岐点比率: +M.bepRatio(v, 1).toFixed(1),
+      売上:           pair(v, M.sales, true),
+      売上原価:       pair(v, M.cogs, true),
+      売上総利益:     pair(v, M.gross, true),
+      販管費:         pair(v, M.sga, true),
+      人件費:         pair(v, M.labor, true),
+      減価償却費:     pair(v, M.dep, true),
+      その他販管費:   pair(v, M.sgaOther, true),
+      営業利益:       pair(v, M.opInc, true),
+      経常利益:       pair(v, M.ordInc, true),
+      EBITDA:         pair(v, M.ebitda, true),
+      原価率:         pair(v, M.cogsRate),
+      粗利率:         pair(v, M.grossRate),
+      人件費率:       pair(v, M.laborRate),
+      労働分配率:     pair(v, M.laborShare),
+      FL比率:         pair(v, M.fl),
+      営業利益率:     pair(v, M.opRate),
+      損益分岐点売上: pair(v, M.bep, true),
+      損益分岐点比率: pair(v, M.bepRatio),
     });
     const target = monthIdx < 0 ? fyPick : mPicks[monthIdx];
     const trend = [];
     months.forEach((m, i) => {
       if (!m.has) return;
+      const v = mPicks[i];
       trend.push({
-        月: m.ym, 売上: Math.round(M.sales(mPicks[i], 1)), 計画: Math.round(M.sales(mPicks[i], 0)),
-        前年: Math.round(M.sales(mPicks[i], 2)), 営業利益: Math.round(M.opInc(mPicks[i], 1)),
-        損益分岐点比率: +M.bepRatio(mPicks[i], 1).toFixed(1),
+        月: m.ym,
+        売上: Math.round(M.sales(v, 1)), 売上前年: Math.round(M.sales(v, 2)),
+        販管費: Math.round(M.sga(v, 1)), 販管費前年: Math.round(M.sga(v, 2)),
+        人件費: Math.round(M.labor(v, 1)), 人件費前年: Math.round(M.labor(v, 2)),
+        営業利益: Math.round(M.opInc(v, 1)), 営業利益前年: Math.round(M.opInc(v, 2)),
+        原価率: +M.cogsRate(v, 1).toFixed(1),
+        損益分岐点比率: +M.bepRatio(v, 1).toFixed(1),
       });
     });
     return {
       期: period.label, 期間: period.period, 確定月数: period.filled, 部門: DEPT_NAMES[dept],
       対象: monthIdx < 0 ? '期累計（' + period.filled + 'ヶ月）' : months[monthIdx].ym,
+      注記: '前年の値がすべて0の月は、前年データが存在しない月です。',
       対象KPI: kpiOf(target),
       期累計KPI: kpiOf(fyPick),
       月次推移: trend,

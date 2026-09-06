@@ -294,7 +294,7 @@ function PlAnalysis({ periodLabel, dept, monthLabel, snapshot }) {
         <span style={{ fontSize: 10, color: '#fff', background: ACCENT, borderRadius: 6, padding: '2px 8px', fontWeight: 600 }}>経営指標</span>
       </div>
       <div style={{ fontSize: 12, color: '#999', marginBottom: 14, lineHeight: 1.6 }}>
-        計画・前年との差、原価率、人件費、損益分岐点までを踏まえてAIが分析します。確定済みの月は2回目以降キャッシュ表示（追加コストなし）。
+        前年との差、販管費の増減、原価率、人件費、損益分岐点までを踏まえてAIが分析します。確定済みの月は2回目以降キャッシュ表示（追加コストなし）。
       </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button onClick={() => run(false)} disabled={loading} style={pill(true, ACCENT)}>
@@ -331,7 +331,7 @@ function PlAnalysis({ periodLabel, dept, monthLabel, snapshot }) {
           )}
           {report.yoy && (
             <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 12, color: '#888', fontWeight: 700, marginBottom: 6, letterSpacing: '.04em' }}>📈 計画・前年との比較</div>
+              <div style={{ fontSize: 12, color: '#888', fontWeight: 700, marginBottom: 6, letterSpacing: '.04em' }}>📈 前年との比較</div>
               <div style={{ fontSize: 13.5, color: '#444', lineHeight: 1.75, paddingLeft: 2 }}>{report.yoy}</div>
             </div>
           )}
@@ -455,15 +455,22 @@ export default function KpiPanel() {
     return {
       期: period.label, 期間: period.period, 確定月数: period.filled, 部門: DEPT_NAMES[dept],
       対象: monthIdx < 0 ? '期累計（' + period.filled + 'ヶ月）' : months[monthIdx].ym,
-      注記: '前年の値がすべて0の月は、前年データが存在しない月です。',
+      注記: '期累計KPIは、前年データを持つ月だけで集計した比較用の値です。期の実績総額は「期累計実績総額」を参照してください。前年の値がすべて0の月は前年データが存在しない月です。',
       対象KPI: kpiOf(target),
-      期累計KPI: kpiOf(fyPick),
+      期累計KPI: kpiOf(cmpPick),
+      期累計実績総額: {
+        売上: Math.round(M.sales(fyPick, 1)),
+        営業利益: Math.round(M.opInc(fyPick, 1)),
+        EBITDA: Math.round(M.ebitda(fyPick, 1)),
+        対象月数: period.filled,
+        比較可能月数: period.filled - period.recoveredCount,
+      },
       月次推移: trend,
       部門別: DEPTS.filter(d => d !== 'total').map(d => ({
         部門: DEPT_NAMES[d], ...kpiOf(makePick(period, d, null)),
       })),
     };
-  }, [period, dept, monthIdx, months, fyPick, mPicks]);
+  }, [period, dept, monthIdx, months, fyPick, cmpPick, mPicks]);
 
   const chartData = useMemo(
     () => months.map((m, i) => (m.has ? {

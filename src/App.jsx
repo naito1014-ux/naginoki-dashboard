@@ -18,6 +18,7 @@ import {
 import Papa from "papaparse";
 import { getGasUrl, setGasUrl, gasGet, gasPost, gasPostFull } from "./lib/gas";
 import KpiPanel from "./components/KpiPanel";
+import SummaryPanel from "./components/SummaryPanel";
 
 // ════════════════════════════════════
 // Constants
@@ -1645,7 +1646,7 @@ function ProductDashboard() {
 // App
 // ════════════════════════════════════
 export default function App() {
-  var _t = useState("daily"); var tab = _t[0]; var setTab = _t[1];
+  var _t = useState("summary"); var tab = _t[0]; var setTab = _t[1];
   var _s = useState(false); var showSettings = _s[0]; var setShowSettings = _s[1];
   var _url = useState(getGasUrl()); var gasUrl = _url[0]; var setGasUrlState = _url[1];
 
@@ -1675,6 +1676,7 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 0, alignItems: "center" }}>
+          <button onClick={function() { setTab("summary"); }} style={tabStyle(tab === "summary")}>{"🗓️ 月次サマリ"}</button>
           <button onClick={function() { setTab("daily"); }} style={tabStyle(tab === "daily")}>{"📈 日別売上推移"}</button>
           <button onClick={function() { setTab("product"); }} style={tabStyle(tab === "product")}>{"📦 商品別分析"}</button>
           <button onClick={function() { setTab("kpi"); }} style={tabStyle(tab === "kpi")}>{"💹 経営指標"}</button>
@@ -1697,7 +1699,7 @@ export default function App() {
             <SettingsPanel onUrlChange={function(u) { setGasUrlState(u); }} />
           </div>
         )}
-        {tab === "daily" ? <DailyDashboard /> : tab === "product" ? <ProductDashboard /> : <KpiPanel />}
+        {tab === "summary" ? <SummaryPanel /> : tab === "daily" ? <DailyDashboard /> : tab === "product" ? <ProductDashboard /> : <KpiPanel />}
       </div>
     </div>
   );

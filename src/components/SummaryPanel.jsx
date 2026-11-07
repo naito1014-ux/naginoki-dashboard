@@ -270,6 +270,7 @@ export default function SummaryPanel() {
               <div>
                 <div style={{ fontSize: 10, color: SUB }}>{'期累計（' + ytdRange + '）'}</div>
                 <div style={{ fontSize: 15, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{f(val(fy0.cur, k))}</div>
+                <div style={{ fontSize: 10, color: SUB, marginTop: 1 }}>前年 {f(val(fy0.pre, k))}</div>
               </div>
               <YoyBadge v={yoy(fy0, k)} />
             </div>
@@ -306,14 +307,14 @@ export default function SummaryPanel() {
                 return (
                   <tr key={d} style={{ fontWeight: total ? 700 : 400 }}>
                     <Td left><DeptName d={d} /></Td>
-                    <Td>{manYen(val(c.cur, 'sales'))}<Share v={total ? null : ratio(c.cur.sales, fr.cur.sales)} /></Td>
+                    <Td><ValStack v={manYen(val(c.cur, 'sales'))} p={manYen(val(c.pre, 'sales'))} extra={<Share v={total ? null : ratio(c.cur.sales, fr.cur.sales)} />} /></Td>
                     <HeatTd v={yoy(c, 'sales')} />
-                    <HeatTd v={yoy(c, 'customers')} sub={ppl(val(c.cur, 'customers'))} />
-                    <HeatTd v={yoy(c, 'avgSpend')} sub={yen(val(c.cur, 'avgSpend'))} />
-                    <Td shade>{manYen(val(y.cur, 'sales'))}</Td>
+                    <HeatTd v={yoy(c, 'customers')} sub={ppl(val(c.cur, 'customers'))} pre={ppl(val(c.pre, 'customers'))} />
+                    <HeatTd v={yoy(c, 'avgSpend')} sub={yen(val(c.cur, 'avgSpend'))} pre={yen(val(c.pre, 'avgSpend'))} />
+                    <Td shade><ValStack v={manYen(val(y.cur, 'sales'))} p={manYen(val(y.pre, 'sales'))} /></Td>
                     <HeatTd v={yoy(y, 'sales')} />
-                    <HeatTd v={yoy(y, 'customers')} sub={ppl(val(y.cur, 'customers'))} />
-                    <HeatTd v={yoy(y, 'avgSpend')} sub={yen(val(y.cur, 'avgSpend'))} />
+                    <HeatTd v={yoy(y, 'customers')} sub={ppl(val(y.cur, 'customers'))} pre={ppl(val(y.pre, 'customers'))} />
+                    <HeatTd v={yoy(y, 'avgSpend')} sub={yen(val(y.cur, 'avgSpend'))} pre={yen(val(y.pre, 'avgSpend'))} />
                   </tr>
                 );
               })}
@@ -353,12 +354,12 @@ export default function SummaryPanel() {
                       return (
                         <tr key={d} style={{ fontWeight: d === '全体' ? 700 : 400 }}>
                           <Td left><DeptName d={d} /></Td>
-                          <HeatTd v={yoy(w, 'sales', true)} sub={yen(val(w.cur, 'sales', true))} />
-                          <HeatTd v={yoy(w, 'customers', true)} sub={ppl(val(w.cur, 'customers', true))} />
-                          <HeatTd v={yoy(w, 'avgSpend')} sub={yen(val(w.cur, 'avgSpend'))} />
-                          <HeatTd v={yoy(h, 'sales', true)} sub={yen(val(h.cur, 'sales', true))} />
-                          <HeatTd v={yoy(h, 'customers', true)} sub={ppl(val(h.cur, 'customers', true))} />
-                          <HeatTd v={yoy(h, 'avgSpend')} sub={yen(val(h.cur, 'avgSpend'))} />
+                          <HeatTd v={yoy(w, 'sales', true)} sub={yen(val(w.cur, 'sales', true))} pre={yen(val(w.pre, 'sales', true))} />
+                          <HeatTd v={yoy(w, 'customers', true)} sub={ppl(val(w.cur, 'customers', true))} pre={ppl(val(w.pre, 'customers', true))} />
+                          <HeatTd v={yoy(w, 'avgSpend')} sub={yen(val(w.cur, 'avgSpend'))} pre={yen(val(w.pre, 'avgSpend'))} />
+                          <HeatTd v={yoy(h, 'sales', true)} sub={yen(val(h.cur, 'sales', true))} pre={yen(val(h.pre, 'sales', true))} />
+                          <HeatTd v={yoy(h, 'customers', true)} sub={ppl(val(h.cur, 'customers', true))} pre={ppl(val(h.pre, 'customers', true))} />
+                          <HeatTd v={yoy(h, 'avgSpend')} sub={yen(val(h.cur, 'avgSpend'))} pre={yen(val(h.pre, 'avgSpend'))} />
                         </tr>
                       );
                     })}
@@ -527,15 +528,25 @@ function Td({ children, left, shade }) {
 }
 
 // 前年比を色付きで。sub に実数を小さく添える
-function HeatTd({ v, sub }) {
+function HeatTd({ v, sub, pre }) {
   const h = heat(v);
   return (
     <td style={{ padding: '4px 4px', borderBottom: '1px solid ' + LINE, textAlign: 'right', whiteSpace: 'nowrap' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
-        {sub && <span style={{ fontSize: 11, color: SUB, fontWeight: 400, fontVariantNumeric: 'tabular-nums' }}>{sub}</span>}
+        {sub && <ValStack v={sub} p={pre} small />}
         <span style={{ minWidth: 54, display: 'inline-block', textAlign: 'center', padding: '3px 6px', borderRadius: 6, background: h.bg, color: h.fg, fontWeight: 700, fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>{pct(v)}</span>
       </div>
     </td>
+  );
+}
+
+// 今年の値（上）と前年の値（下・小さく薄く）
+function ValStack({ v, p, small, extra }) {
+  return (
+    <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.25, fontVariantNumeric: 'tabular-nums' }}>
+      <span style={{ fontSize: small ? 12 : 13, color: small ? '#555' : INK }}>{v}{extra}</span>
+      {p != null && <span style={{ fontSize: 10, color: '#aaa69c', fontWeight: 400 }}>{'前年 ' + p}</span>}
+    </span>
   );
 }
 

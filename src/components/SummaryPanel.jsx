@@ -577,7 +577,7 @@ function Decomp({ title, d }) {
       <div style={{ flex: 1, height: 7, background: '#f0eee8', borderRadius: 4, overflow: 'hidden' }}>
         <div style={{ width: (Math.abs(v) / max) * 100 + '%', height: '100%', background: v >= 0 ? UP : DOWN }} />
       </div>
-      <span style={{ width: 50, textAlign: 'right', color: v >= 0 ? UP : DOWN, fontVariantNumeric: 'tabular-nums' }}>{manSigned(v)}</span>
+      <span style={{ minWidth: 58, textAlign: 'right', whiteSpace: 'nowrap', color: v >= 0 ? UP : DOWN, fontVariantNumeric: 'tabular-nums' }}>{manSigned(v)}</span>
     </div>
   );
   return (

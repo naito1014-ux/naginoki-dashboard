@@ -1657,7 +1657,7 @@ export default function App() {
       background: active ? "rgba(27,67,50,.06)" : "transparent",
       color: active ? "#1b4332" : "#666",
       fontWeight: active ? 700 : 500,
-      fontSize: 14, cursor: "pointer", transition: "all .2s", letterSpacing: ".02em"
+      fontSize: 14, cursor: "pointer", transition: "all .2s", letterSpacing: ".02em", whiteSpace: "nowrap"
     };
   };
 
@@ -1675,7 +1675,7 @@ export default function App() {
             <div style={{ fontSize: 10, color: "#999", letterSpacing: ".08em" }}>{"売上管理ダッシュボード"}</div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 0, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 0, alignItems: "center", overflowX: "auto", maxWidth: "100%" }}>
           <button onClick={function() { setTab("summary"); }} style={tabStyle(tab === "summary")}>{"🗓️ 月次サマリ"}</button>
           <button onClick={function() { setTab("daily"); }} style={tabStyle(tab === "daily")}>{"📈 日別売上推移"}</button>
           <button onClick={function() { setTab("product"); }} style={tabStyle(tab === "product")}>{"📦 商品別分析"}</button>

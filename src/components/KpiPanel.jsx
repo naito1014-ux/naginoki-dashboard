@@ -128,6 +128,7 @@ export function parsePlWorkbook(arrayBuffer, fileName) {
   return {
     fyStartMonth: FY_START_MONTH,
     periods, accounts,
+    accountOrder: Object.keys(accSet),   // 帳票に出てきた順（詳細表示の並びに使う）
     deptNames: DEPT_NAMES, depts: DEPTS,
     updatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
   };
@@ -214,6 +215,67 @@ const ROWS = [
   { k: 'bepRatio',   lab: '損益分岐点比率', t: 'pct',   dim: true },
 ];
 const LOWER_BETTER = { cogs: 1, cogsRate: 1, sga: 1, labor: 1, dep: 1, sgaOther: 1, laborRate: 1, laborShare: 1, fl: 1, bep: 1, bepRatio: 1 };
+
+/* ── 詳細表示（全勘定科目）の並びと属性 ───────────────
+   [勘定科目名, item（明細）| total（小計・合計）, 小さいほど良い科目なら1]
+   損益計算書の並び順どおりに定義する。
+   ──────────────────────────────────────────────────── */
+const DETAIL_SPEC = [
+  ['売上高', 'item'], ['その他売上高', 'item'], ['家賃売上高', 'item'],
+  ['共益費収入', 'item'], ['売上値引戻り高', 'item'],
+  ['純売上高', 'total'],
+
+  ['期首商品たな卸高', 'item', 1], ['商品仕入高', 'item', 1],
+  ['仕入値引戻り高', 'item', 1], ['期末商品たな卸高', 'item', 1],
+  ['売上原価', 'total', 1],
+  ['売上総利益', 'total'],
+
+  ['役員報酬', 'item', 1], ['給料手当', 'item', 1], ['雑給', 'item', 1],
+  ['賞与', 'item', 1], ['退職金', 'item', 1], ['法定福利費', 'item', 1],
+  ['福利厚生費', 'item', 1], ['賞与引当金繰入', 'item', 1],
+  ['広告宣伝費', 'item', 1], ['荷造運賃', 'item', 1], ['倒産防止共済掛金', 'item', 1],
+  ['会議費', 'item', 1], ['支払手数料', 'item', 1], ['旅費交通費', 'item', 1],
+  ['通信費', 'item', 1], ['接待交際費', 'item', 1], ['諸会費', 'item', 1],
+  ['地代・家賃', 'item', 1], ['減価償却費', 'item', 1], ['修繕費', 'item', 1],
+  ['保険料', 'item', 1], ['租税公課', 'item', 1], ['水道光熱費', 'item', 1],
+  ['事務用品費', 'item', 1], ['消耗品費', 'item', 1], ['車両費', 'item', 1],
+  ['新聞図書費', 'item', 1], ['寄付金', 'item', 1], ['貸倒引当金繰入', 'item', 1],
+  ['貸倒引当金戻入', 'item'], ['管理諸費', 'item', 1], ['リース料', 'item', 1],
+  ['衛生費', 'item', 1], ['雑費', 'item', 1],
+  ['販売費・一般管理費計', 'total', 1],
+  ['営業利益', 'total'],
+
+  ['受取利息・割引料', 'item'], ['受取配当金', 'item'], ['雑収入', 'item'],
+  ['営業外収益', 'total'],
+  ['支払利息・割引料', 'item', 1], ['現金過不足', 'item', 1],
+  ['貸倒損失', 'item', 1], ['雑損失', 'item', 1],
+  ['営業外費用', 'total', 1],
+  ['営業外損益計', 'total'],
+  ['経常利益', 'total'],
+
+  ['固定資産売却益', 'item'], ['その他の特別利益', 'item'], ['前期損益修正益', 'item'],
+  ['特別利益', 'total'],
+  ['固定資産除却損', 'item', 1], ['固定資産圧縮損', 'item', 1],
+  ['固定資産売却損', 'item', 1], ['その他の特別損失', 'item', 1],
+  ['特別勘定繰入損', 'item', 1], ['前期損益修正損', 'item', 1],
+  ['特別損失', 'total', 1],
+  ['税引前当期純利益', 'total'],
+
+  ['法人税･住民税･事業税', 'item', 1], ['過年度法人税', 'item', 1],
+  ['当期純利益', 'total'],
+];
+const HIGHLIGHT_ACC = { 営業利益: 1, 経常利益: 1, 当期純利益: 1 };
+
+// 行の共通形。get(v, i) で値を取り出す（v は makePick の戻り値）
+const accRow = (name, kind, lower) => ({
+  key: 'a:' + name, lab: name, t: 'money',
+  grp: kind === 'total', ch: kind === 'item', hl: !!HIGHLIGHT_ACC[name],
+  lower: !!lower, get: (v, i) => v(name)[i],
+});
+const kpiRow = r => ({
+  key: r.k, lab: r.lab, t: r.t, grp: r.grp, ch: r.ch, hl: r.hl, dim: r.dim,
+  lower: !!LOWER_BETTER[r.k], get: M[r.k],
+});
 
 /* ── 表示ヘルパー ───────────────────────────────────── */
 const cma = n => Math.round(n).toLocaleString('ja-JP');
@@ -355,6 +417,7 @@ export default function KpiPanel() {
   const [mode, setMode] = useState('plan');
   const [unit, setUnit] = useState('k');
   const [monthIdx, setMonthIdx] = useState(-1);      // -1 = 期累計
+  const [view, setView] = useState('simple');        // simple = 経営指標 / detail = 全勘定科目
   const [msg, setMsg] = useState('');
   const [drag, setDrag] = useState(false);
   const [loadingData, setLoadingData] = useState(true);
@@ -519,7 +582,7 @@ export default function KpiPanel() {
     };
     if (!has) return <td key={key} style={{ ...base, color: '#d4d0c8', fontWeight: 400 }}>–</td>;
 
-    const act = M[row.k](v, 1);
+    const act = row.get(v, 1);
     const top = row.t === 'money' ? money(act, unit) : act.toFixed(1) + '%';
     let sub = '', color = '#aaa';
     if (mode === 'ratio') {
@@ -527,11 +590,11 @@ export default function KpiPanel() {
     } else {
       // cmp が渡された場合は、計画・前年を持つ月だけで差を取る
       const cv = cmp || v;
-      const b = M[row.k](cv, mode === 'plan' ? 0 : 2);
+      const b = row.get(cv, mode === 'plan' ? 0 : 2);
       if (b !== 0) {
-        const d = M[row.k](cv, 1) - b;
+        const d = row.get(cv, 1) - b;
         sub = row.t === 'money' ? signed(d, x => money(x, unit)) : signed(d, x => x.toFixed(1) + 'pt');
-        color = diffColor(row.t === 'money' ? d / 1000 : d, LOWER_BETTER[row.k]);
+        color = diffColor(row.t === 'money' ? d / 1000 : d, row.lower);
       }
     }
     return (
@@ -541,6 +604,31 @@ export default function KpiPanel() {
       </td>
     );
   };
+
+  // 表の行。簡易＝経営指標、詳細＝損益計算書の全勘定科目（全月ゼロの科目は省く）
+  const tableRows = (() => {
+    if (view === 'simple') return ROWS.map(kpiRow);
+    const listed = {};
+    const rows = [];
+    const alive = name => {
+      const arr = (period.data[dept] || {})[name];
+      if (!arr) return false;
+      for (let i = 0; i < arr.length; i++) {
+        if (!months[i].has) continue;
+        if (arr[i][0] || arr[i][1] || arr[i][2]) return true;
+      }
+      return false;
+    };
+    DETAIL_SPEC.forEach(([name, kind, lower]) => {
+      listed[name] = 1;
+      if (alive(name)) rows.push(accRow(name, kind, lower));
+    });
+    // 定義にない科目が帳票に増えていた場合は末尾に足す
+    (pl.accountOrder || pl.accounts || []).forEach(name => {
+      if (!listed[name] && alive(name)) rows.push(accRow(name, 'item'));
+    });
+    return rows;
+  })();
 
   const cmpOn = period.recoveredCount > 0 && mode !== 'ratio';
   const s = M.sales(fyPick, 1);
@@ -565,6 +653,11 @@ export default function KpiPanel() {
             </button>
           ))}
           <span style={{ fontSize: 11.5, color: '#aaa', marginLeft: 4 }}>{period.period}</span>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+            {[['simple', '簡易'], ['detail', '詳細（全科目）']].map(([k, l]) => (
+              <button key={k} onClick={() => setView(k)} style={pill(view === k, '#1b4332')}>{l}</button>
+            ))}
+          </div>
         </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           {DEPTS.map(d => (
@@ -615,8 +708,8 @@ export default function KpiPanel() {
               </tr>
             </thead>
             <tbody>
-              {ROWS.map(row => (
-                <tr key={row.k}>
+              {tableRows.map(row => (
+                <tr key={row.key}>
                   <td style={{ borderBottom: '1px solid #eee', borderRight: '1px solid #d4d0c8', padding: '7px 10px',
                                paddingLeft: row.ch ? 24 : 10, position: 'sticky', left: 0, zIndex: 1,
                                background: row.hl ? '#fdf5f0' : row.grp ? '#f4f2ec' : '#fff',
@@ -629,6 +722,12 @@ export default function KpiPanel() {
           </table>
         </div>
       </div>
+      {view === 'detail' && (
+        <div style={{ marginTop: 8, fontSize: 11, color: '#aaa' }}>
+          損益計算書の勘定科目をそのままの並びで表示しています（{tableRows.length}科目）。
+          全月とも計上のない科目は省いています。
+        </div>
+      )}
       {period.recoveredCount > 0 && (
         <div style={{ marginTop: 8, fontSize: 11, color: '#b5651d' }}>
           * 印の月は、翌期シートの前年列から復元した実績です。計画と前年を持たないため、累計の差と計画比・前年比はこの月を除いて算出しています。

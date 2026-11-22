@@ -328,38 +328,36 @@ export default function SummaryPanel() {
       <Card>
         <CardTitle title="平日／土日祝" note="日数が年で違うため、売上・客数は1日平均で前年と比較。土日祝＝土曜・日曜・祝日（振替休日を含む）" />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
-          {[
-            { title: mOf(focusYm) + (fr.cut ? '（' + fr.cut + '日まで）' : ''), get: (d, dt) => pairOf(focusYm, d, dt) },
-            { title: '期累計（' + ytdRange + '）', get: (d, dt) => ytdOf(fy, focusYm, d, dt) },
-          ].map(blk => {
-            const wd = blk.get('全体', 'weekday'), hd = blk.get('全体', 'holiday');
+          {[['weekday', '平日'], ['holiday', '土日祝']].map(([dt, name]) => {
+            const m = pairOf(focusYm, '全体', dt), y = ytdOf(fy, focusYm, '全体', dt);
+            const days = p => p.cur.days + '日' ;
             return (
-              <div key={blk.title} style={{ overflowX: 'auto' }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: INK, margin: '0 0 6px 2px' }}>{blk.title}</div>
+              <div key={dt} style={{ overflowX: 'auto' }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: INK, margin: '0 0 6px 2px' }}><DayTag k={dt} />{name}</div>
                 <table style={tableStyle}>
                   <thead>
                     <tr>
                       <Th left rowSpan={2}>部門</Th>
-                      <Th group colSpan={3}><DayTag k="weekday" />{'平日 ' + wd.cur.days + '日'}<span style={{ fontWeight: 400, color: SUB }}>{'（前年' + wd.pre.days + '日）'}</span></Th>
-                      <Th group colSpan={3} shade><DayTag k="holiday" />{'土日祝 ' + hd.cur.days + '日'}<span style={{ fontWeight: 400, color: SUB }}>{'（前年' + hd.pre.days + '日）'}</span></Th>
+                      <Th group colSpan={3}>{mOf(focusYm) + (fr.cut ? '（' + fr.cut + '日まで）' : '') + '　' + days(m)}<span style={{ fontWeight: 400, color: SUB }}>{'（前年' + m.pre.days + '日）'}</span></Th>
+                      <Th group colSpan={3} shade>{'期累計（' + ytdRange + '）　' + days(y)}<span style={{ fontWeight: 400, color: SUB }}>{'（前年' + y.pre.days + '日）'}</span></Th>
                     </tr>
                     <tr>
                       <Th>1日売上</Th><Th>1日客数</Th><Th>客単価</Th>
-                      <Th>1日売上</Th><Th>1日客数</Th><Th>客単価</Th>
+                      <Th shade>1日売上</Th><Th shade>1日客数</Th><Th shade>客単価</Th>
                     </tr>
                   </thead>
                   <tbody>
                     {DEPTS.map(d => {
-                      const w = blk.get(d, 'weekday'), h = blk.get(d, 'holiday');
+                      const c = pairOf(focusYm, d, dt), t = ytdOf(fy, focusYm, d, dt);
                       return (
                         <tr key={d} style={{ fontWeight: d === '全体' ? 700 : 400 }}>
                           <Td left><DeptName d={d} /></Td>
-                          <HeatTd v={yoy(w, 'sales', true)} sub={yen(val(w.cur, 'sales', true))} pre={yen(val(w.pre, 'sales', true))} />
-                          <HeatTd v={yoy(w, 'customers', true)} sub={ppl(val(w.cur, 'customers', true))} pre={ppl(val(w.pre, 'customers', true))} />
-                          <HeatTd v={yoy(w, 'avgSpend')} sub={yen(val(w.cur, 'avgSpend'))} pre={yen(val(w.pre, 'avgSpend'))} />
-                          <HeatTd v={yoy(h, 'sales', true)} sub={yen(val(h.cur, 'sales', true))} pre={yen(val(h.pre, 'sales', true))} />
-                          <HeatTd v={yoy(h, 'customers', true)} sub={ppl(val(h.cur, 'customers', true))} pre={ppl(val(h.pre, 'customers', true))} />
-                          <HeatTd v={yoy(h, 'avgSpend')} sub={yen(val(h.cur, 'avgSpend'))} pre={yen(val(h.pre, 'avgSpend'))} />
+                          <HeatTd v={yoy(c, 'sales', true)} sub={yen(val(c.cur, 'sales', true))} pre={yen(val(c.pre, 'sales', true))} />
+                          <HeatTd v={yoy(c, 'customers', true)} sub={ppl(val(c.cur, 'customers', true))} pre={ppl(val(c.pre, 'customers', true))} />
+                          <HeatTd v={yoy(c, 'avgSpend')} sub={yen(val(c.cur, 'avgSpend'))} pre={yen(val(c.pre, 'avgSpend'))} />
+                          <HeatTd shade v={yoy(t, 'sales', true)} sub={yen(val(t.cur, 'sales', true))} pre={yen(val(t.pre, 'sales', true))} />
+                          <HeatTd shade v={yoy(t, 'customers', true)} sub={ppl(val(t.cur, 'customers', true))} pre={ppl(val(t.pre, 'customers', true))} />
+                          <HeatTd shade v={yoy(t, 'avgSpend')} sub={yen(val(t.cur, 'avgSpend'))} pre={yen(val(t.pre, 'avgSpend'))} />
                         </tr>
                       );
                     })}
@@ -528,10 +526,10 @@ function Td({ children, left, shade }) {
 }
 
 // 前年比を色付きで。sub に実数を小さく添える
-function HeatTd({ v, sub, pre }) {
+function HeatTd({ v, sub, pre, shade }) {
   const h = heat(v);
   return (
-    <td style={{ padding: '4px 4px', borderBottom: '1px solid ' + LINE, textAlign: 'right', whiteSpace: 'nowrap' }}>
+    <td style={{ padding: '4px 4px', borderBottom: '1px solid ' + LINE, textAlign: 'right', whiteSpace: 'nowrap', background: shade ? '#f8f7f3' : 'transparent' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
         {sub && <ValStack v={sub} p={pre} small />}
         <span style={{ minWidth: 54, display: 'inline-block', textAlign: 'center', padding: '3px 6px', borderRadius: 6, background: h.bg, color: h.fg, fontWeight: 700, fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>{pct(v)}</span>

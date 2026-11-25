@@ -116,7 +116,8 @@ export function parsePlWorkbook(arrayBuffer, fileName) {
     const no = latestNo != null ? latestNo - idx : null;
     return {
       key: String(sy),
-      label: no != null ? '第' + no + '期' : sy + '年度',
+      // ファイル名から期が取れない場合（アップロードで日本語名が崩れた等）は、6月開始年から算出（2026年6月開始＝第61期）
+      label: '第' + (no != null ? no : sy - 1965) + '期',
       period: sy + '年06月 〜 ' + (sy + 1) + '年05月',
       filled: months.filter(mo => mo.has).length,
       recoveredCount: months.filter(mo => mo.recovered).length,
@@ -452,7 +453,11 @@ export default function KpiPanel() {
       setMonthIdx(-1);
       try { localStorage.setItem(PL_KEY, JSON.stringify(parsed)); } catch { /* noop */ }
       setMsg('✅ ' + parsed.periods.map(p => p.label + '（' + p.filled + 'ヶ月）').join('、') + ' を取り込みました');
-      gasPostFull({ action: 'savePlData', pl: parsed }).then(r => {
+      // GAS側の savePlData は旧スキーマ（fy / months / data）の有無で保存可否を判定するため、
+      // 最新期の内容を旧キーにも載せて送る（読み出し側は periods を使う）
+      const p0 = parsed.periods[0];
+      const compat = Object.assign({}, parsed, { fy: p0.label, period: p0.period, months: p0.months, data: p0.data });
+      gasPostFull({ action: 'savePlData', pl: compat }).then(r => {
         if (!r || !r.ok) setMsg(m => m + '　※スプレッドシートへの保存は未完了です');
       });
     });
